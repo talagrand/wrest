@@ -1,0 +1,119 @@
+[package]
+name = "wrest"
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.90"
+description = "Async HTTP client for Windows backed by WinHTTP, with a reqwest-compatible API"
+authors = ["Eugene Talagrand"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["http", "request", "client", "windows"]
+categories = ["web-programming::http-client"]
+repository = "https://github.com/talagrand/wrest"
+exclude = ["docs/http3.md", "docs/parity-gaps.md", ".github/"]
+
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc"]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.clippy]
+unwrap_used = "warn"
+uninlined_format_args = "warn"
+unnecessary_to_owned = "warn"
+manual_assert = "warn"
+allow_attributes = "warn"
+redundant_clone = "warn"
+# in nursery
+index_refutable_slice = "warn"
+clone_on_ref_ptr = "warn"
+# indexing_slicing = "warn"
+# string_slice = "warn"
+enum_glob_use = "warn"
+implicit_clone = "warn"
+expl_impl_clone_on_copy = "warn"
+
+[features]
+default = []
+
+## Enables diagnostic logging via the [`tracing`](https://docs.rs/tracing) crate.
+##
+## When enabled, wrest emits `trace!`-level events for WinHTTP
+## connection callbacks (DNS, connect, redirect, bytes sent/received)
+## and `warn!`/`debug!` for internal edge cases.  Without a
+## `tracing` subscriber these are zero-cost no-ops.
+tracing = ["dep:tracing"]
+
+## Enables no-op reqwest compatibility stubs.
+##
+## When enabled, wrest exposes methods like
+## `ClientBuilder::gzip()`, `tcp_nodelay()`, `pool_idle_timeout()`, etc.
+## that accept and ignore their arguments.  This lets code written
+## against reqwest compile without changes.  Disable this feature if
+## you prefer compile-time detection of unsupported API usage.
+noop-compat = []
+
+## Enables `Client::new()` and `impl Default for Client`, which panic on
+## failure.  Disabled by default — prefer `Client::builder().build()` for
+## fallible construction.  Provided for reqwest API compatibility.
+panicking-compat = []
+
+## Enables `RequestBuilder::json()` and `Response::json()`.
+json = ["dep:serde", "dep:serde_json"]
+
+## Enables `RequestBuilder::form()`.
+form = ["dep:serde", "dep:serde_json", "dep:form_urlencoded"]
+
+## Enables `RequestBuilder::query()`.
+query = ["dep:serde", "dep:serde_json", "dep:form_urlencoded"]
+
+[dependencies]
+windows-sys = { version = ">=0.52, <0.62", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Networking_WinHttp",
+    "Win32_System_LibraryLoader",
+] }
+futures-core = { version = "0.3", default-features = false, features = ["alloc"] }
+futures-channel = { version = "0.3", default-features = false, features = ["alloc"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+futures-timer = "3"
+serde = { version = "1", optional = true, default-features = false, features = ["alloc"] }
+serde_json = { version = "1", optional = true, default-features = false, features = ["alloc"] }
+form_urlencoded = { version = "1", optional = true, default-features = false, features = ["alloc"] }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
+http = { version = "1", default-features = false, features = ["std"] }
+bytes = { version = "1", default-features = false }
+
+[dev-dependencies]
+futures-executor = "0.3"
+futures-util = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
+serde = { version = "1", features = ["derive"] }
+
+[[example]]
+name = "simple_get"
+required-features = ["json"]
+
+[[example]]
+name = "json_crud"
+required-features = ["json"]
+
+[[example]]
+name = "concurrent"
+required-features = ["json", "query"]
+
+[[example]]
+name = "github_api"
+required-features = ["json", "query"]
+
+[[example]]
+name = "hn_live"
+required-features = ["json"]
+
+[[example]]
+name = "streaming"
+
