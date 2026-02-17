@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: windows-latest
+    # Only run in non-fork repositories.
+    if: github.event.repository.fork == false
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: Get tag name
+      id: tag_name
+      shell: pwsh
+      run: |
+        $tagName = $env:GITHUB_REF -replace '^refs/tags/', ''
+        "TAG_NAME=$tagName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+    - name: Verify version matches tag
+      shell: pwsh
+      run: |
+        $tagVersion = ($env:GITHUB_REF -replace '^refs/tags/v', '')
+        $cargoVersion = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | ForEach-Object { $_.Matches.Groups[1].Value })
+        if ($tagVersion -ne $cargoVersion) {
+          Write-Error "Tag version (v$tagVersion) doesn't match Cargo.toml version ($cargoVersion)"
+          exit 1
+        }
+        Write-Output "Version check passed: $cargoVersion"
+
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag_name.outputs.TAG_NAME }}
+        release_name: Release ${{ steps.tag_name.outputs.TAG_NAME }}
+        draft: false
+        prerelease: false
+
+  publish-crate:
+    name: Publish to crates.io
+    runs-on: windows-latest
+    if: github.event.repository.fork == false
+    needs: create-release
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache dependencies
+      uses: Swatinem/rust-cache@v2
+
+    - name: Publish to crates.io
+      run: cargo publish --all-features --token ${{ secrets.CRATES_IO_TOKEN }}

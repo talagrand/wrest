@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test Suite
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust-version: ['1.90', 'stable']
+        cargo-args:
+          - '--no-default-features'
+          - '--no-default-features --features noop-compat'
+          - '--no-default-features --features json'
+          - '--no-default-features --features form'
+          - '--no-default-features --features query'
+          - '--all-features'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ matrix.rust-version }}
+
+    - name: Install clippy (stable only)
+      if: matrix.rust-version == 'stable'
+      run: rustup component add clippy
+
+    - name: Cache dependencies
+      uses: Swatinem/rust-cache@v2
+
+    - name: Run tests
+      run: cargo test --all-targets ${{ matrix.cargo-args }} --verbose
+
+    - name: Run clippy
+      if: matrix.rust-version == 'stable'
+      run: cargo clippy --all-targets ${{ matrix.cargo-args }} -- -D warnings
+
+    - name: Run doc tests (all features)
+      run: cargo test --doc --all-features
+
+  fmt:
+    name: Formatting
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt
+
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+  docs:
+    name: Documentation
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache dependencies
+      uses: Swatinem/rust-cache@v2
+
+    - name: Build documentation
+      run: cargo doc --all-features --no-deps
+
+  coverage:
+    name: Coverage
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: llvm-tools-preview
+
+    - name: Install cargo-llvm-cov
+      uses: taiki-e/install-action@cargo-llvm-cov
+
+    - name: Cache dependencies
+      uses: Swatinem/rust-cache@v2
+
+    - name: Generate coverage
+      run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+
+    - name: Upload to Codecov
+      uses: codecov/codecov-action@v5
+      with:
+        files: lcov.info
+        fail_ci_if_error: true
+      env:
+        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  security:
+    name: Security Audit
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: Install cargo-audit
+      run: cargo install cargo-audit
+
+    - name: Run security audit
+      run: cargo audit

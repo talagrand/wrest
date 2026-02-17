@@ -1,0 +1,11 @@
+use_field_init_shorthand = true
+# These two options are a subset of use_small_heuristics = "Max",
+# which is a popular config option. We want to keep data-driven
+# test tables dense: tuples are "fn_call" and live in arrays,
+# so we set these 2 options explicitly while keeping everything else at
+# the defaults.
+# The true intent is 100 (= max_width), but rustfmt seems to adjust that
+# value down when the crate has sub-modules by 2 * tab_spaces for a
+# final value of 92
+fn_call_width = 92
+array_width = 92
