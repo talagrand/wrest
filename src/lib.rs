@@ -1,7 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![doc(html_logo_url = "https://raw.githubusercontent.com/talagrand/wrest/main/docs/wrest.png")]
 #![cfg(windows)]
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![allow(private_interfaces)]

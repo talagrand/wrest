@@ -176,7 +176,7 @@ If you find undocumented deviations, please file an issue!
 
 ## Minimum supported Rust version
 
-Rust **1.90** (edition 2024).
+Rust 1.90.
 
 ## License
 

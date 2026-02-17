@@ -1,6 +1,6 @@
 [package]
 name = "wrest"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 rust-version = "1.90"
 description = "Async HTTP client for Windows backed by WinHTTP, with a reqwest-compatible API"
@@ -16,7 +16,6 @@ exclude = ["docs/http3.md", "docs/parity-gaps.md", ".github/"]
 default-target = "x86_64-pc-windows-msvc"
 targets = ["x86_64-pc-windows-msvc"]
 all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
 
 [lints.clippy]
 unwrap_used = "warn"
@@ -97,23 +96,29 @@ serde = { version = "1", features = ["derive"] }
 [[example]]
 name = "simple_get"
 required-features = ["json"]
+doc-scrape-examples = true
 
 [[example]]
 name = "json_crud"
 required-features = ["json"]
+doc-scrape-examples = true
 
 [[example]]
 name = "concurrent"
 required-features = ["json", "query"]
+doc-scrape-examples = true
 
 [[example]]
 name = "github_api"
 required-features = ["json", "query"]
+doc-scrape-examples = true
 
 [[example]]
 name = "hn_live"
 required-features = ["json"]
+doc-scrape-examples = true
 
 [[example]]
 name = "streaming"
+doc-scrape-examples = true
 
