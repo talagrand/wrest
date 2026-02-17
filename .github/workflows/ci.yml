@@ -127,3 +127,25 @@ jobs:
 
     - name: Run security audit
       run: cargo audit
+
+  minimal-versions:
+    name: Minimal Versions
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: Install Rust nightly
+      uses: dtolnay/rust-toolchain@nightly
+
+    - name: Install Rust stable
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install cargo-hack and cargo-minimal-versions
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-hack,cargo-minimal-versions
+
+    - name: Check minimal versions
+      run: cargo +nightly minimal-versions check --direct --all-features
