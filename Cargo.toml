@@ -68,28 +68,28 @@ form = ["dep:serde", "dep:serde_json", "dep:form_urlencoded"]
 query = ["dep:serde", "dep:serde_json", "dep:form_urlencoded"]
 
 [dependencies]
-windows-sys = { version = ">=0.52, <0.62", default-features = false, features = [
+windows-sys = { version = ">=0.59, <0.62", default-features = false, features = [
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Networking_WinHttp",
     "Win32_System_LibraryLoader",
 ] }
-futures-core = { version = "0.3", default-features = false, features = ["alloc"] }
-futures-channel = { version = "0.3", default-features = false, features = ["alloc"] }
-futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+futures-core = "0.3.31"
+futures-channel = "0.3.31"
+futures-util = "0.3.31"
 futures-timer = "3"
-serde = { version = "1", optional = true, default-features = false, features = ["alloc"] }
-serde_json = { version = "1", optional = true, default-features = false, features = ["alloc"] }
-form_urlencoded = { version = "1", optional = true, default-features = false, features = ["alloc"] }
-base64 = { version = "0.22", default-features = false, features = ["alloc"] }
-tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
-http = { version = "1", default-features = false, features = ["std"] }
-bytes = { version = "1", default-features = false }
+serde = { version = "1", optional = true }
+serde_json = { version = "1", optional = true }
+form_urlencoded = { version = "1", optional = true }
+base64 = "0.22"
+tracing = { version = "0.1.40", default-features = false, features = ["std"], optional = true }
+http = "1"
+bytes = "1.11.1"
 
 [dev-dependencies]
-futures-executor = "0.3"
-futures-util = "0.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+futures-executor = "0.3.31"
+futures-util = "0.3.31"
+tokio = { version = "1.44.2", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
 serde = { version = "1", features = ["derive"] }
 
