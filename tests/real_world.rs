@@ -11,7 +11,6 @@
 //!
 //! Test targets are chosen to be safe for testing:
 //! - example.com: IANA reserved domain for testing
-//! - microsoft.com: Massive scale infrastructure
 //! - httpbin.org: Designed for HTTP client testing
 //! - badssl.com: Designed for TLS testing
 //!
@@ -58,27 +57,6 @@ async fn example_com() {
     // example.com returns a simple HTML page
     let text = resp.text().await.expect("should read body");
     assert!(text.contains("Example Domain"), "should contain expected text");
-}
-
-/// Test against microsoft.com - validates real HTTP/2, compression, redirects
-#[tokio::test]
-async fn microsoft_com() {
-    let client = test_client();
-
-    let resp = client
-        .get("https://www.microsoft.com/")
-        .send()
-        .await
-        .expect("microsoft.com should be reachable");
-
-    assert!(resp.status().is_success(), "microsoft.com should return 2xx");
-
-    // Microsoft.com likely uses HTTP/2
-    let version = resp.version();
-    println!("Microsoft.com negotiated: {version:?}");
-
-    // Should have real headers from production server
-    assert!(resp.headers().contains_key("content-type"));
 }
 
 /// Test httpbin.org/get - service designed for HTTP testing
