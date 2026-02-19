@@ -1,6 +1,6 @@
 [package]
 name = "wrest"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 rust-version = "1.90"
 description = "Async HTTP client for Windows backed by WinHTTP, with a reqwest-compatible API"
@@ -10,7 +10,7 @@ readme = "README.md"
 keywords = ["http", "request", "client", "windows"]
 categories = ["web-programming::http-client"]
 repository = "https://github.com/talagrand/wrest"
-exclude = ["docs/http3.md", "docs/parity-gaps.md", ".github/"]
+exclude = ["docs/http3.md", ".github/"]
 
 # build.rs emits `native_winhttp` when on Windows without `always-reqwest`.
 [lints.rust]
