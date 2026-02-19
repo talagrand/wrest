@@ -591,10 +591,10 @@ mod tests {
 
         for &(input, needle, label) in cases {
             let err = winhttp_crack_url(input).expect_err(&format!("{label}: should fail"));
-            assert!(
-                err.to_string().contains(needle),
-                "{label}: expected '{needle}' in error, got: {err}"
-            );
+            assert!(err.is_builder(), "{label}: expected builder error");
+            // Display shows kind prefix; detail text is in Debug.
+            let debug = format!("{err:?}");
+            assert!(debug.contains(needle), "{label}: expected '{needle}' in debug, got: {debug}");
         }
     }
 }

@@ -699,9 +699,11 @@ async fn streaming_body_error_propagated() {
         err.is_request(),
         "expected a request error (body stream failed during send), got: {err:?}"
     );
+    // Display shows a generic prefix ("error sending request"), matching
+    // reqwest.  The root-cause "boom" text is in the Debug representation.
     assert!(
-        format!("{err}").contains("boom"),
-        "error message should contain the stream error text, got: {err}"
+        format!("{err:?}").contains("boom"),
+        "error debug should contain the stream error text, got: {err:?}"
     );
 }
 

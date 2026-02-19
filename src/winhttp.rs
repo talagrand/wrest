@@ -1474,7 +1474,9 @@ mod tests {
     fn signal_cancelled_into_error() {
         let err: Error = SignalCancelled.into();
         assert!(err.is_request());
-        assert!(err.to_string().contains("cancelled"));
+        // Display shows kind prefix; "cancelled" detail is in Debug.
+        assert_eq!(err.to_string(), "error sending request");
+        assert!(format!("{err:?}").contains("cancelled"));
     }
 
     // -- Additional error path coverage --
@@ -1504,9 +1506,12 @@ mod tests {
 
         let err = callback_error_to_error(ERROR_WINHTTP_SECURE_FAILURE, &state, &url);
         assert!(err.is_connect());
+        // Display shows kind prefix; TLS detail is in the Debug output.
+        assert_eq!(err.to_string(), "error trying to connect for url (https://example.com/)");
+        let debug = format!("{err:?}");
         assert!(
-            err.to_string().contains("invalid CA"),
-            "TLS error should be enriched with failure details, got: {err}"
+            debug.contains("invalid CA"),
+            "TLS error should be enriched with failure details in debug, got: {debug}"
         );
     }
 

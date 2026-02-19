@@ -223,8 +223,24 @@ impl Error {
 }
 
 impl fmt::Display for Error {
+    /// Matches reqwest's `Display`: a kind-based prefix, then
+    /// ` for url (...)` when the URL is known.  The detail message
+    /// is available via the `Debug` representation.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)?;
+        match self.kind {
+            ErrorKind::Builder => f.write_str("builder error")?,
+            ErrorKind::Request => f.write_str("error sending request")?,
+            ErrorKind::Body => f.write_str("request or response body error")?,
+            ErrorKind::Decode => f.write_str("error decoding response body")?,
+            ErrorKind::Redirect => f.write_str("error following redirect")?,
+            ErrorKind::Connect => f.write_str("error trying to connect")?,
+            ErrorKind::Timeout => f.write_str("operation timed out")?,
+            ErrorKind::Status => {
+                // Matches reqwest: "HTTP status client error (404 Not Found)"
+                write!(f, "{}", self.message)?;
+            }
+            ErrorKind::Upgrade => f.write_str("error upgrading connection")?,
+        }
         if let Some(url) = &self.url {
             write!(f, " for url ({url})")?;
         }
@@ -284,10 +300,12 @@ mod tests {
 
     #[test]
     fn error_display_format() {
-        // (label, error, expected_display)
+        // Display uses kind-based prefixes matching reqwest::Error.
+        // The `message` field is only used for Status errors where it
+        // carries the "HTTP status {client,server} error (CODE REASON)" text.
         let cases: Vec<(&str, Error, &str)> = vec![
             (
-                "with_url",
+                "connect_with_url",
                 Error {
                     kind: ErrorKind::Connect,
                     message: "connection refused".into(),
@@ -295,10 +313,10 @@ mod tests {
                     status: None,
                     url: Some(Box::new("https://example.com".into_url().unwrap())),
                 },
-                "connection refused for url (https://example.com/)",
+                "error trying to connect for url (https://example.com/)",
             ),
             (
-                "without_url",
+                "timeout_no_url",
                 Error {
                     kind: ErrorKind::Timeout,
                     message: "operation timed out".into(),
@@ -308,6 +326,10 @@ mod tests {
                 },
                 "operation timed out",
             ),
+            ("request", Error::request("something went wrong"), "error sending request"),
+            ("body", Error::body("read failed"), "request or response body error"),
+            ("builder", Error::builder("bad config"), "builder error"),
+            ("decode", Error::decode("invalid json"), "error decoding response body"),
             (
                 "status_client",
                 Error {
@@ -433,7 +455,9 @@ mod tests {
         let url = "https://example.com/api".into_url().unwrap();
         let err = Error::request("something failed").with_url(url);
         assert_eq!(err.url().map(|u| u.as_str()), Some("https://example.com/api"));
-        assert_eq!(err.to_string(), "something failed for url (https://example.com/api)");
+        // Display uses kind-based prefix; detail is in the Debug/message field.
+        assert_eq!(err.to_string(), "error sending request for url (https://example.com/api)");
+        assert!(format!("{err:?}").contains("something failed"));
     }
 
     #[test]
@@ -476,7 +500,9 @@ mod tests {
     #[test]
     fn decode_error_message() {
         let err = Error::decode("JSON deserialization failed");
-        assert_eq!(err.to_string(), "JSON deserialization failed");
+        // Display shows kind prefix; detail is in Debug.
+        assert_eq!(err.to_string(), "error decoding response body");
+        assert!(format!("{err:?}").contains("JSON deserialization failed"));
     }
 
     #[test]
@@ -500,8 +526,10 @@ mod tests {
         assert!(err.url().is_some());
         let err = err.without_url();
         assert!(err.url().is_none());
-        // Message preserved
-        assert_eq!(err.to_string(), "fail");
+        // Display uses kind prefix; URL is stripped.
+        assert_eq!(err.to_string(), "error sending request");
+        // Message preserved in Debug.
+        assert!(format!("{err:?}").contains("fail"));
     }
 
     // NOTE: `with_url` public API is already exercised by `error_with_url_builder`
@@ -540,15 +568,19 @@ mod tests {
         assert!(!err.is_timeout());
     }
 
-    /// from_hresult produces a message containing the HRESULT hex value.
+    /// from_hresult stores the HRESULT hex value in the message field
+    /// (visible via Debug), while Display shows the kind-based prefix.
     #[test]
     fn from_hresult_message_format() {
         use crate::abi::hresult_from_win32;
         let hr = hresult_from_win32(ERROR_WINHTTP_TIMEOUT);
         let err = Error::from_hresult(hr);
-        let msg = err.to_string();
-        assert!(msg.contains("HRESULT"), "message should contain HRESULT: {msg}");
-        assert!(msg.contains(&format!("{hr:08X}")), "message should contain hex value: {msg}");
+        // Display: kind-based prefix
+        assert_eq!(err.to_string(), "operation timed out");
+        // Debug: includes the HRESULT detail for diagnostics
+        let debug = format!("{err:?}");
+        assert!(debug.contains("HRESULT"), "debug should contain HRESULT: {debug}");
+        assert!(debug.contains(&format!("{hr:08X}")), "debug should contain hex value: {debug}");
     }
 
     // NOTE: REDIRECT_FAILED → is_redirect() is already covered by the
