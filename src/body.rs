@@ -126,8 +126,8 @@ impl Body {
                 use futures_util::StreamExt;
                 let mut buf = Vec::new();
                 while let Some(chunk) = stream.next().await {
-                    let bytes =
-                        chunk.map_err(|e| crate::Error::body(format!("stream body error: {e}")))?;
+                    let bytes = chunk
+                        .map_err(|e| crate::Error::body("stream body error").with_source(e))?;
                     buf.extend_from_slice(&bytes);
                 }
                 Ok(buf)

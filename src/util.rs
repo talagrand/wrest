@@ -72,7 +72,7 @@ pub(crate) fn read_env_var(name: &str) -> Option<String> {
 /// `context` is included in the error message to indicate the source of the
 /// data (e.g. `"UTF-16LE"`, `"ICU produced invalid UTF-16"`).
 pub(crate) fn string_from_utf16(buf: &[u16], context: &str) -> Result<String, Error> {
-    String::from_utf16(buf).map_err(|e| Error::decode(format!("{context}: {e}")))
+    String::from_utf16(buf).map_err(|e| Error::decode(context).with_source(e))
 }
 
 // ---------------------------------------------------------------------------

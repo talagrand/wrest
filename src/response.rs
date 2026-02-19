@@ -305,7 +305,7 @@ impl Response {
     pub async fn json<T: serde::de::DeserializeOwned>(mut self) -> Result<T, Error> {
         let data = self.collect_body().await?;
         serde_json::from_slice(&data)
-            .map_err(|e| Error::decode(format!("JSON deserialization failed: {e}")))
+            .map_err(|e| Error::decode("JSON deserialization failed").with_source(e))
     }
 
     /// Read the entire response body as raw bytes.

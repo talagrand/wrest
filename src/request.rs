@@ -216,7 +216,7 @@ impl RequestBuilder {
             Ok(n) => n,
             Err(e) => {
                 let e: http::Error = e.into();
-                self.url = Err(Error::builder(format!("invalid header name: {e}")));
+                self.url = Err(Error::builder("invalid header name").with_source(e));
                 return self;
             }
         };
@@ -224,7 +224,7 @@ impl RequestBuilder {
             Ok(v) => v,
             Err(e) => {
                 let e: http::Error = e.into();
-                self.url = Err(Error::builder(format!("invalid header value: {e}")));
+                self.url = Err(Error::builder("invalid header value").with_source(e));
                 return self;
             }
         };
@@ -250,7 +250,7 @@ impl RequestBuilder {
             }
             Err(e) => {
                 // Defer the error to send() -- replace url with Err
-                self.url = Err(Error::builder(format!("JSON serialization failed: {e}")));
+                self.url = Err(Error::builder("JSON serialization failed").with_source(e));
             }
         }
         self
@@ -416,10 +416,10 @@ impl RequestBuilder {
         // Append per-request headers (accumulates multi-values).
         for (name, value) in &self.headers {
             let header_name = http::header::HeaderName::from_bytes(name.as_bytes())
-                .map_err(|e| Error::builder(format!("invalid header name: {e}")))?;
+                .map_err(|e| Error::builder("invalid header name").with_source(e))?;
 
             let header_value = http::header::HeaderValue::from_bytes(&narrow_latin1(value))
-                .map_err(|e| Error::builder(format!("invalid header value: {e}")))?;
+                .map_err(|e| Error::builder("invalid header value").with_source(e))?;
             header_map.append(header_name, header_value);
         }
 
@@ -446,7 +446,7 @@ impl RequestBuilder {
         }
 
         let method = http::Method::from_bytes(self.method.as_bytes())
-            .map_err(|e| Error::builder(format!("invalid method: {e}")))?;
+            .map_err(|e| Error::builder("invalid method").with_source(e))?;
 
         Ok(Request {
             method,
@@ -553,7 +553,7 @@ impl RequestBuilder {
 /// dependencies.
 fn serialize_form_urlencoded<T: serde::Serialize + ?Sized>(value: &T) -> Result<String, Error> {
     let json = serde_json::to_value(value)
-        .map_err(|e| Error::builder(format!("form serialization failed: {e}")))?;
+        .map_err(|e| Error::builder("form serialization failed").with_source(e))?;
 
     let mut ser = form_urlencoded::Serializer::new(String::new());
 

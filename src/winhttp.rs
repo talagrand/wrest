@@ -103,11 +103,8 @@ pub(crate) enum CallbackEvent {
     WriteComplete(u32),
     /// `REQUEST_ERROR` -- operation failed.  The payload is a **Win32
     /// error code** (`u32`) from `WINHTTP_ASYNC_RESULT.dwError` -- one of
-    /// the `ERROR_WINHTTP_*` constants, *not* an HRESULT.
-    ///
-    /// [`error_from_winhttp_code`] converts it to an HRESULT before
-    /// constructing the [`Error`].
-    Error(u32),
+    /// the `ERROR_WINHTTP_*` constants.
+    Win32Error(u32),
 }
 
 impl CallbackEvent {
@@ -121,7 +118,7 @@ impl CallbackEvent {
     pub fn into_result(self, state: &RequestState, url: &Url) -> Result<(), Error> {
         match self {
             CallbackEvent::Complete => Ok(()),
-            CallbackEvent::Error(code) => Err(callback_error_to_error(code, state, url)),
+            CallbackEvent::Win32Error(code) => Err(callback_error_to_error(code, state, url)),
             other => Err(other.unexpected(url)),
         }
     }
@@ -130,7 +127,7 @@ impl CallbackEvent {
     pub fn into_read_complete(self, url: &Url) -> Result<u32, Error> {
         match self {
             CallbackEvent::ReadComplete(n) => Ok(n),
-            CallbackEvent::Error(code) => Err(error_from_winhttp_code(code).with_url(url.clone())),
+            CallbackEvent::Win32Error(code) => Err(Error::from_win32(code).with_url(url.clone())),
             other => Err(other.unexpected(url)),
         }
     }
@@ -139,7 +136,7 @@ impl CallbackEvent {
     pub fn into_write_complete(self, url: &Url) -> Result<u32, Error> {
         match self {
             CallbackEvent::WriteComplete(n) => Ok(n),
-            CallbackEvent::Error(code) => Err(error_from_winhttp_code(code).with_url(url.clone())),
+            CallbackEvent::Win32Error(code) => Err(Error::from_win32(code).with_url(url.clone())),
             other => Err(other.unexpected(url)),
         }
     }
@@ -249,7 +246,9 @@ pub(crate) unsafe extern "system" fn winhttp_callback(
 
         WINHTTP_CALLBACK_STATUS_REQUEST_ERROR => {
             let result = unsafe { &*(lpv_info as *const WINHTTP_ASYNC_RESULT) };
-            state.signal.signal(CallbackEvent::Error(result.dwError));
+            state
+                .signal
+                .signal(CallbackEvent::Win32Error(result.dwError));
         }
 
         WINHTTP_CALLBACK_STATUS_SECURE_FAILURE => {
@@ -691,7 +690,9 @@ pub(crate) async fn execute_request(
             let chunk = chunk_result.map_err(|e| {
                 // Classified as Request (not Body) to match reqwest: this is a
                 // send-phase failure, not a response-body-read failure.
-                Error::request(format!("stream body error: {e}")).with_url(url.clone())
+                Error::request("stream body error")
+                    .with_source(e)
+                    .with_url(url.clone())
             })?;
 
             if chunk.is_empty() {
@@ -1006,8 +1007,10 @@ fn query_status_code(h_request: *mut core::ffi::c_void, url: &Url) -> Result<Sta
     )
     .url_context(url)?;
 
-    StatusCode::from_u16(status_code as u16).map_err(|_| {
-        Error::request(format!("invalid status code: {status_code}")).with_url(url.clone())
+    StatusCode::from_u16(status_code as u16).map_err(|e| {
+        Error::request(format!("invalid status code: {status_code}"))
+            .with_source(e)
+            .with_url(url.clone())
     })
 }
 
@@ -1061,17 +1064,9 @@ fn resolve_version(protocol_flags: Option<u32>, version_str: Option<&str>) -> Ve
 // Error helpers
 // ---------------------------------------------------------------------------
 
-/// Create an [`Error`] from a raw WinHTTP error code (`u32`).
-///
-/// Converts the code to an HRESULT and delegates to [`Error::from_hresult`]
-/// so that error-kind classification happens in one place.
-fn error_from_winhttp_code(code: u32) -> Error {
-    Error::from_hresult(abi::hresult_from_win32(code))
-}
-
 /// Create an Error from a WinHTTP callback error, enriching with TLS details.
 fn callback_error_to_error(code: u32, state: &RequestState, url: &Url) -> Error {
-    let mut err = error_from_winhttp_code(code);
+    let mut err = Error::from_win32(code);
     err.url = Some(Box::new(url.clone()));
 
     // Enrich TLS errors with captured failure flags
@@ -1117,8 +1112,8 @@ fn describe_tls_failure(flags: u32) -> String {
 }
 
 impl From<SignalCancelled> for Error {
-    fn from(_: SignalCancelled) -> Self {
-        Error::request("operation cancelled (signal dropped)")
+    fn from(sc: SignalCancelled) -> Self {
+        Error::request("operation cancelled").with_source(sc)
     }
 }
 
@@ -1405,7 +1400,7 @@ mod tests {
         #[expect(clippy::type_complexity)]
         let cases: Vec<(CallbackEvent, Result<(), fn(&Error) -> bool>)> = vec![
             (CallbackEvent::Complete, Ok(())),
-            (CallbackEvent::Error(ERROR_WINHTTP_TIMEOUT), Err(Error::is_timeout)),
+            (CallbackEvent::Win32Error(ERROR_WINHTTP_TIMEOUT), Err(Error::is_timeout)),
             (CallbackEvent::ReadComplete(42), Err(Error::is_request)),
             (CallbackEvent::WriteComplete(0), Err(Error::is_request)),
         ];
@@ -1463,7 +1458,7 @@ mod tests {
             assert!(err.is_request(), "{label}: wrong variant should be request error");
 
             // Timeout variant → is_timeout error
-            let err = method(CallbackEvent::Error(ERROR_WINHTTP_TIMEOUT), &url).unwrap_err();
+            let err = method(CallbackEvent::Win32Error(ERROR_WINHTTP_TIMEOUT), &url).unwrap_err();
             assert!(err.is_timeout(), "{label}: timeout variant");
         }
     }
@@ -1482,7 +1477,7 @@ mod tests {
     // -- Additional error path coverage --
 
     // NOTE: WinHTTP error-code → ErrorKind classification is covered
-    // exhaustively in error.rs::hresult_classification_table.
+    // exhaustively in error.rs::win32_classification_table.
 
     #[test]
     fn callback_error_to_error_preserves_url() {

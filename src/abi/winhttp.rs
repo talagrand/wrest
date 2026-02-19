@@ -266,7 +266,7 @@ pub(crate) fn winhttp_query_raw_headers(handle: RawWinHttpHandle) -> Result<Stri
     // Any error other than ERROR_INSUFFICIENT_BUFFER is unexpected.
     let err = unsafe { GetLastError() };
     if err != windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER {
-        return Err(Error::from_hresult(super::hresult_from_win32(err)));
+        return Err(Error::from_win32(err));
     }
 
     if size == 0 {
@@ -510,7 +510,7 @@ pub(crate) fn winhttp_crack_url(url: &str) -> Result<CrackedUrl, Error> {
             ICU_ESCAPE,
             &mut components,
         ))
-        .map_err(|_| Error::builder(format!("invalid URL: {url}")))?;
+        .map_err(|e| Error::builder(format!("invalid URL: {url}")).with_source(e))?;
     }
 
     Ok(CrackedUrl {

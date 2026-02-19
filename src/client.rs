@@ -344,12 +344,12 @@ impl ClientBuilder {
             Ok(v) => match v.to_str() {
                 Ok(s) => self.user_agent = s.to_owned(),
                 Err(e) => {
-                    self.error = Some(Error::builder(format!("invalid user-agent value: {e}")));
+                    self.error = Some(Error::builder("invalid user-agent value").with_source(e));
                 }
             },
             Err(e) => {
                 let e: http::Error = e.into();
-                self.error = Some(Error::builder(format!("invalid user-agent: {e}")));
+                self.error = Some(Error::builder("invalid user-agent").with_source(e));
             }
         }
         self

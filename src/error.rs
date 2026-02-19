@@ -6,11 +6,13 @@
 //! [`is_body()`](Error::is_body), [`is_status()`](Error::is_status),
 //! [`status()`](Error::status), and [`url()`](Error::url).
 
-use crate::abi::hresult_from_win32;
 use crate::url::Url;
 use http::StatusCode;
 use std::fmt;
+use std::io;
 use windows_sys::Win32::Networking::WinHttp::*;
+
+pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// The error type for wrest operations.
 ///
@@ -24,7 +26,7 @@ use windows_sys::Win32::Networking::WinHttp::*;
 pub struct Error {
     pub(crate) kind: ErrorKind,
     pub(crate) message: String,
-    pub(crate) source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    pub(crate) source: Option<BoxError>,
     pub(crate) status: Option<StatusCode>,
     pub(crate) url: Option<Box<Url>>,
 }
@@ -149,6 +151,17 @@ impl Error {
         self
     }
 
+    /// Attach a source error (builder pattern).
+    ///
+    /// Stores the underlying cause so that
+    /// [`std::error::Error::source`] returns it, making error chains
+    /// inspectable by `anyhow`, `eyre`, and manual walks.
+    #[must_use]
+    pub(crate) fn with_source(mut self, source: impl Into<BoxError>) -> Self {
+        self.source = Some(source.into());
+        self
+    }
+
     // -- Internal constructors --
 
     /// Shared constructor for simple error kinds (no source, no status, no URL).
@@ -184,18 +197,19 @@ impl Error {
         }
     }
 
-    /// Create an error from an HRESULT code.
+    /// Create an error from a Win32 / WinHTTP error code (`u32`).
     ///
-    /// The HRESULT is classified into an [`ErrorKind`] and formatted into
-    /// the error message.  Callers typically produce the HRESULT via
-    /// [`hresult_from_win32`](crate::abi::hresult_from_win32).
-    pub(crate) fn from_hresult(hresult: i32) -> Self {
-        let kind = error_kind_from_hresult(hresult);
-        let message = format!("WinHTTP error (HRESULT 0x{hresult:08X})");
+    /// The code is classified into an [`ErrorKind`] and stored as an
+    /// [`io::Error`] in the source chain with a mapped
+    /// [`io::ErrorKind`] where possible (e.g. `ConnectionRefused`,
+    /// `TimedOut`).
+    pub(crate) fn from_win32(code: u32) -> Self {
+        let kind = error_kind_from_win32(code);
+        let message = format!("WinHTTP error {code}");
         Self {
             kind,
             message,
-            source: None,
+            source: Some(Box::new(io_error_from_winhttp(code))),
             status: None,
             url: None,
         }
@@ -224,8 +238,8 @@ impl Error {
 
 impl fmt::Display for Error {
     /// Matches reqwest's `Display`: a kind-based prefix, then
-    /// ` for url (...)` when the URL is known.  The detail message
-    /// is available via the `Debug` representation.
+    /// ` for url (...)` when the URL is known.  The source error
+    /// detail is available via [`std::error::Error::source`].
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {
             ErrorKind::Builder => f.write_str("builder error")?,
@@ -268,21 +282,40 @@ impl std::error::Error for Error {
     }
 }
 
-/// Map an HRESULT to an [`ErrorKind`].
+/// Classify a Win32 / WinHTTP error code into an [`ErrorKind`].
 ///
-/// The HRESULT is produced by [`hresult_from_win32`](crate::abi::hresult_from_win32)
-/// from a raw Win32 / WinHTTP error code. This is the **single** place in
-/// the crate that classifies WinHTTP failures into [`ErrorKind`] variants.
-fn error_kind_from_hresult(hresult: i32) -> ErrorKind {
-    // WinHTTP error codes are u32 constants. Convert to HRESULT for comparison.
-    match hresult {
-        c if c == hresult_from_win32(ERROR_WINHTTP_CANNOT_CONNECT) => ErrorKind::Connect,
-        c if c == hresult_from_win32(ERROR_WINHTTP_NAME_NOT_RESOLVED) => ErrorKind::Connect,
-        c if c == hresult_from_win32(ERROR_WINHTTP_CONNECTION_ERROR) => ErrorKind::Connect,
-        c if c == hresult_from_win32(ERROR_WINHTTP_SECURE_FAILURE) => ErrorKind::Connect,
-        c if c == hresult_from_win32(ERROR_WINHTTP_TIMEOUT) => ErrorKind::Timeout,
-        c if c == hresult_from_win32(ERROR_WINHTTP_REDIRECT_FAILED) => ErrorKind::Redirect,
+/// This is the **single** place in the crate that classifies WinHTTP
+/// failures into [`ErrorKind`] variants.
+fn error_kind_from_win32(code: u32) -> ErrorKind {
+    match code {
+        ERROR_WINHTTP_CANNOT_CONNECT => ErrorKind::Connect,
+        ERROR_WINHTTP_NAME_NOT_RESOLVED => ErrorKind::Connect,
+        ERROR_WINHTTP_CONNECTION_ERROR => ErrorKind::Connect,
+        ERROR_WINHTTP_SECURE_FAILURE => ErrorKind::Connect,
+        ERROR_WINHTTP_TIMEOUT => ErrorKind::Timeout,
+        ERROR_WINHTTP_REDIRECT_FAILED => ErrorKind::Redirect,
         _ => ErrorKind::Request,
+    }
+}
+
+/// Create an [`io::Error`] from a WinHTTP error code with a mapped
+/// [`io::ErrorKind`] where a natural mapping exists.
+///
+/// Uses [`io::Error::from_raw_os_error`] as the inner error so that
+/// Windows' `FormatMessage` provides the human-readable description.
+/// For codes with a well-known mapping (e.g. `CANNOT_CONNECT` -->
+/// `ConnectionRefused`) the outer error carries the translated kind;
+/// for all others the raw OS error is returned directly.
+fn io_error_from_winhttp(code: u32) -> io::Error {
+    let mapped_kind = match code {
+        ERROR_WINHTTP_CANNOT_CONNECT => Some(io::ErrorKind::ConnectionRefused),
+        ERROR_WINHTTP_CONNECTION_ERROR => Some(io::ErrorKind::ConnectionReset),
+        ERROR_WINHTTP_TIMEOUT => Some(io::ErrorKind::TimedOut),
+        _ => None,
+    };
+    match mapped_kind {
+        Some(kind) => io::Error::new(kind, io::Error::from_raw_os_error(code as i32)),
+        None => io::Error::from_raw_os_error(code as i32),
     }
 }
 
@@ -471,13 +504,7 @@ mod tests {
     #[test]
     fn error_std_error_source() {
         let inner = std::io::Error::other("inner");
-        let err = Error {
-            kind: ErrorKind::Body,
-            message: "read failed".into(),
-            source: Some(Box::new(inner)),
-            status: None,
-            url: None,
-        };
+        let err = Error::body("read failed").with_source(inner);
         assert!(StdError::source(&err).is_some());
     }
 
@@ -535,54 +562,81 @@ mod tests {
     // NOTE: `with_url` public API is already exercised by `error_with_url_builder`
     // and by `error_without_url` above.
 
-    // -- HRESULT classification via from_hresult --
+    // -- Win32 code classification via from_win32 --
 
-    /// Each WinHTTP error code produces the expected ErrorKind.
+    /// Comprehensive test for `from_win32`: error-kind classification,
+    /// Display/Debug formatting, source-chain `io::Error`, and
+    /// `io::ErrorKind` mapping -- all in one table.
     #[test]
-    fn hresult_classification_table() {
-        use crate::abi::hresult_from_win32;
-
+    fn from_win32_table() {
+        // (code, label, kind check, expected io::ErrorKind or None)
         #[expect(clippy::type_complexity)]
-        let cases: &[(u32, &str, fn(&Error) -> bool)] = &[
-            (ERROR_WINHTTP_CANNOT_CONNECT, "connect", Error::is_connect),
-            (ERROR_WINHTTP_NAME_NOT_RESOLVED, "connect (dns)", Error::is_connect),
-            (ERROR_WINHTTP_CONNECTION_ERROR, "connect (conn)", Error::is_connect),
-            (ERROR_WINHTTP_SECURE_FAILURE, "connect (tls)", Error::is_connect),
-            (ERROR_WINHTTP_TIMEOUT, "timeout", Error::is_timeout),
-            (ERROR_WINHTTP_REDIRECT_FAILED, "redirect", Error::is_redirect),
+        let cases: &[(u32, &str, fn(&Error) -> bool, Option<io::ErrorKind>)] = &[
+            (
+                ERROR_WINHTTP_CANNOT_CONNECT,
+                "connect",
+                Error::is_connect,
+                Some(io::ErrorKind::ConnectionRefused),
+            ),
+            (ERROR_WINHTTP_NAME_NOT_RESOLVED, "connect (dns)", Error::is_connect, None),
+            (
+                ERROR_WINHTTP_CONNECTION_ERROR,
+                "connect (conn)",
+                Error::is_connect,
+                Some(io::ErrorKind::ConnectionReset),
+            ),
+            (ERROR_WINHTTP_SECURE_FAILURE, "connect (tls)", Error::is_connect, None),
+            (ERROR_WINHTTP_TIMEOUT, "timeout", Error::is_timeout, Some(io::ErrorKind::TimedOut)),
+            (ERROR_WINHTTP_REDIRECT_FAILED, "redirect", Error::is_redirect, None),
+            // Unknown code falls through to Request.
+            (0xFFFF, "unknown", Error::is_request, None),
         ];
 
-        for &(code, label, check) in cases {
-            let err = Error::from_hresult(hresult_from_win32(code));
+        for &(code, label, check, expected_io_kind) in cases {
+            let err = Error::from_win32(code);
+
+            // ErrorKind classification
             assert!(check(&err), "{label}: expected is_*() to be true");
+
+            // Display: kind-based prefix (no raw code)
+            let display = err.to_string();
+            assert!(
+                !display.contains(&code.to_string()),
+                "{label}: Display should not contain raw code"
+            );
+
+            // Debug: includes "WinHTTP error <code>" for diagnostics
+            let debug = format!("{err:?}");
+            assert!(
+                debug.contains(&format!("WinHTTP error {code}")),
+                "{label}: Debug should contain code: {debug}"
+            );
+
+            // Source chain: always an io::Error
+            let source =
+                StdError::source(&err).unwrap_or_else(|| panic!("{label}: should have source"));
+            let io_err = source
+                .downcast_ref::<io::Error>()
+                .unwrap_or_else(|| panic!("{label}: source should be io::Error"));
+
+            // io::ErrorKind mapping (when one exists)
+            if let Some(kind) = expected_io_kind {
+                assert_eq!(io_err.kind(), kind, "{label}: wrong io::ErrorKind");
+            }
         }
     }
 
-    /// An unknown HRESULT falls through to ErrorKind::Request.
+    /// Source errors stored via `with_source()` are accessible through
+    /// the standard `Error::source()` chain and can be downcast.
     #[test]
-    fn hresult_unknown_maps_to_request() {
-        // Use an arbitrary HRESULT that is not a known WinHTTP code.
-        let err = Error::from_hresult(0x8007_FFFF_u32 as i32);
-        assert!(err.is_request(), "unknown HRESULT should map to request");
-        assert!(!err.is_connect());
-        assert!(!err.is_timeout());
-    }
+    fn with_source_downcast() {
+        let inner = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe");
+        let err = Error::body("read failed").with_source(inner);
 
-    /// from_hresult stores the HRESULT hex value in the message field
-    /// (visible via Debug), while Display shows the kind-based prefix.
-    #[test]
-    fn from_hresult_message_format() {
-        use crate::abi::hresult_from_win32;
-        let hr = hresult_from_win32(ERROR_WINHTTP_TIMEOUT);
-        let err = Error::from_hresult(hr);
-        // Display: kind-based prefix
-        assert_eq!(err.to_string(), "operation timed out");
-        // Debug: includes the HRESULT detail for diagnostics
-        let debug = format!("{err:?}");
-        assert!(debug.contains("HRESULT"), "debug should contain HRESULT: {debug}");
-        assert!(debug.contains(&format!("{hr:08X}")), "debug should contain hex value: {debug}");
+        let source = StdError::source(&err).expect("should have source");
+        let io_err = source
+            .downcast_ref::<std::io::Error>()
+            .expect("downcast to io::Error");
+        assert_eq!(io_err.kind(), std::io::ErrorKind::BrokenPipe);
     }
-
-    // NOTE: REDIRECT_FAILED → is_redirect() is already covered by the
-    // "redirect" row in `hresult_classification_table` above.
 }
