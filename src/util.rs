@@ -224,6 +224,11 @@ mod tests {
         // The mutex is now poisoned.
         assert!(mutex.lock().is_err(), "mutex should be poisoned");
 
+        // Install a no-op subscriber so the `warn!()` inside
+        // `lock_or_clear` actually evaluates (improves coverage).
+        #[cfg(feature = "tracing")]
+        let _guard = ::tracing::subscriber::set_default(crate::tracing::SinkSubscriber);
+
         // lock_or_clear recovers and returns a valid guard.
         let guard = lock_or_clear(&mutex);
         assert_eq!(*guard, 42);

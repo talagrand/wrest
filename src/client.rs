@@ -976,6 +976,10 @@ mod tests {
         let client = Client::default();
         // Verify it produced a working client (session opened)
         assert!(Arc::strong_count(&client.inner) >= 1);
+
+        // Client::new() is the same as Client::default().
+        let client2 = Client::new();
+        assert!(Arc::strong_count(&client2.inner) >= 1);
     }
 
     #[test]

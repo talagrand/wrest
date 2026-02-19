@@ -1185,6 +1185,11 @@ mod tests {
 
     #[test]
     fn build_url_userinfo_table() {
+        // Install a no-op subscriber so the `trace!()` inside
+        // userinfo injection actually evaluates (improves coverage).
+        #[cfg(feature = "tracing")]
+        let _guard = ::tracing::subscriber::set_default(crate::tracing::SinkSubscriber);
+
         // (label, url, explicit_auth_header, expected_auth)
         let cases: &[(&str, &str, Option<&str>, Option<&str>)] = &[
             (

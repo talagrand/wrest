@@ -16,8 +16,8 @@
 NATIVE_FEATURES = "charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream"
 
 [alias]
-xt   = "test   --all-targets --features charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream"
-xc   = "clippy --all-targets --features charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream -- -D warnings"
-xtr  = "test   --all-targets --features charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream,always-reqwest"
-xcr  = "clippy --all-targets --features charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream,always-reqwest -- -D warnings"
-xcov = "llvm-cov             --features charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream"
+xt   = "test     --all-targets --features charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream"
+xc   = "clippy   --all-targets --features charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream -- -D warnings"
+xtr  = "test     --all-targets --features charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream,always-reqwest"
+xcr  = "clippy   --all-targets --features charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream,always-reqwest -- -D warnings"
+xcov = "llvm-cov --all-targets --features charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream"
