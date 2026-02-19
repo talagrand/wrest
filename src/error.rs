@@ -279,7 +279,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::url::IntoUrl;
+    use crate::url::IntoUrlSealed;
     use std::error::Error as StdError;
 
     #[test]

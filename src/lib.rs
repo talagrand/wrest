@@ -197,11 +197,12 @@ mod tests {
         assert!(s.contains("Builder"), "Error debug: {s}");
 
         // -- Url (Display + Debug) --
-        let url = "https://example.com".into_url().unwrap();
+        let url: Url = "https://example.com".parse().unwrap();
         let s = format!("{url}");
         assert!(s.contains("example.com"), "Url display: {s}");
         let s = format!("{url:?}");
-        assert!(s.contains("Url("), "Url debug: {s}");
+        assert!(s.starts_with("Url { "), "Url debug should be struct format: {s}");
+        assert!(s.contains("scheme"), "Url debug should contain scheme: {s}");
 
         // -- Version (Debug) --
         let s = format!("{:?}", Version::HTTP_11);

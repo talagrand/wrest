@@ -204,8 +204,29 @@ impl std::fmt::Display for Url {
 }
 
 impl std::fmt::Debug for Url {
+    /// Matches `url::Url`'s derived Debug format so that diagnostic output is
+    /// identical regardless of whether the native or reqwest backend is active.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Url").field(&self.serialized).finish()
+        // url::Url shows host as `Some(Domain("..."))` for http/https.
+        struct HostDebug<'a>(&'a str);
+        impl std::fmt::Debug for HostDebug<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                // Matches `Some(Domain("example.com"))`.
+                write!(f, "Some(Domain({:?}))", self.0)
+            }
+        }
+
+        f.debug_struct("Url")
+            .field("scheme", &self.scheme)
+            .field("cannot_be_a_base", &false)
+            .field("username", &self.username)
+            .field("password", &self.password)
+            .field("host", &HostDebug(&self.host))
+            .field("port", &self.port())
+            .field("path", &self.path)
+            .field("query", &self.query)
+            .field("fragment", &self.fragment)
+            .finish()
     }
 }
 
@@ -255,57 +276,64 @@ impl TryFrom<String> for Url {
 // IntoUrl
 // ---------------------------------------------------------------------------
 
-/// Sealing module -- prevents external crates from implementing [`IntoUrl`].
-mod private {
-    pub trait Sealed {}
-    impl Sealed for &str {}
-    impl Sealed for String {}
-    impl Sealed for &String {}
-    impl Sealed for super::Url {}
-    impl Sealed for &super::Url {}
+/// Supertrait that carries the actual `into_url()` method.
+///
+/// This trait is `pub` inside the crate but is **not** re-exported from the
+/// crate root, so external callers cannot import it and therefore cannot
+/// call `into_url()` directly — matching `reqwest::into_url::IntoUrlSealed`.
+///
+/// It also serves as a seal: because external crates cannot name
+/// `IntoUrlSealed`, they cannot implement [`IntoUrl`].
+pub trait IntoUrlSealed {
+    /// Convert this value into a validated [`Url`].
+    fn into_url(self) -> Result<Url, Error>;
 }
 
 /// A trait for types that can be converted to a validated URL.
 ///
 /// Implemented for `&str`, `String`, and [`Url`].  Invalid URLs produce an
-/// [`Error`] at request-build time -- not inside `send()`.
+/// [`Error`] at request-build time — not inside `send()`.
 ///
-/// This trait is sealed -- it cannot be implemented outside of `wrest`,
-/// matching `reqwest::IntoUrl`.
-pub trait IntoUrl: private::Sealed {
-    /// Convert this value into a validated [`Url`].
-    fn into_url(self) -> Result<Url, Error>;
-}
+/// This trait is sealed — it cannot be implemented outside of `wrest`,
+/// matching `reqwest::IntoUrl`.  The `into_url()` method lives on the
+/// non-exported supertrait [`IntoUrlSealed`], so external callers cannot
+/// invoke it.
+pub trait IntoUrl: IntoUrlSealed {}
 
-impl IntoUrl for &str {
+impl IntoUrlSealed for &str {
     fn into_url(self) -> Result<Url, Error> {
         Url::parse_impl(self)
     }
 }
+impl IntoUrl for &str {}
 
-impl IntoUrl for String {
+impl IntoUrlSealed for String {
     fn into_url(self) -> Result<Url, Error> {
         Url::parse_impl(&self)
     }
 }
+impl IntoUrl for String {}
 
-impl IntoUrl for &String {
+impl IntoUrlSealed for &String {
     fn into_url(self) -> Result<Url, Error> {
         Url::parse_impl(self)
     }
 }
+impl IntoUrl for &String {}
 
-impl IntoUrl for Url {
+impl IntoUrlSealed for Url {
     fn into_url(self) -> Result<Url, Error> {
         Ok(self)
     }
 }
+impl IntoUrl for Url {}
 
-impl IntoUrl for &Url {
+impl IntoUrlSealed for &Url {
     fn into_url(self) -> Result<Url, Error> {
         Ok(self.clone())
     }
 }
+impl IntoUrl for &Url {}
 
 impl Url {
     /// Parse a URL string using `WinHttpCrackUrl`.
@@ -712,8 +740,12 @@ mod tests {
     fn url_debug() {
         let url = "https://example.com/path".into_url().unwrap();
         let debug = format!("{url:?}");
-        assert!(debug.starts_with("Url("));
-        assert!(debug.contains("https://example.com/path"));
+        // Matches url::Url derived Debug: `Url { scheme: ..., host: Some(Domain("...")), ... }`
+        assert!(debug.starts_with("Url { "), "expected struct debug: {debug}");
+        assert!(debug.contains("scheme: \"https\""), "scheme: {debug}");
+        assert!(debug.contains("host: Some(Domain(\"example.com\"))"), "host: {debug}");
+        assert!(debug.contains("path: \"/path\""), "path: {debug}");
+        assert!(debug.contains("port: None"), "default port should be None: {debug}");
     }
 
     #[test]
