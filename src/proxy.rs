@@ -748,8 +748,8 @@ mod tests {
 
     #[test]
     fn proxy_constructor_rejects_bad_input() {
-        #[expect(clippy::type_complexity)]
-        let cases: &[(&str, fn(&str) -> Result<Proxy, crate::Error>, &str)] = &[
+        type TestCase<'a> = (&'a str, fn(&str) -> Result<Proxy, crate::Error>, &'a str);
+        let cases: &[TestCase] = &[
             ("all(socks5)", |u| Proxy::all(u), "socks5://proxy:1080"),
             ("all(socks4)", |u| Proxy::all(u), "socks4://proxy:1080"),
             ("http(bad)", |u| Proxy::http(u), "not-a-url"),
@@ -764,10 +764,10 @@ mod tests {
     // -- Proxy::http / Proxy::https apply_to (data-driven) --
 
     #[test]
-    #[expect(clippy::type_complexity)]
     fn proxy_apply_to_table() {
         // (label, scheme, url, expected_http_url, expected_https_url)
-        let cases: &[(&str, &str, &str, Option<&str>, Option<&str>)] = &[
+        type TestCase<'a> = (&'a str, &'a str, &'a str, Option<&'a str>, Option<&'a str>);
+        let cases: &[TestCase] = &[
             ("http only", "http", "http://http-only:8080", Some("http://http-only:8080"), None),
             ("https only", "https", "http://https-only:8080", None, Some("http://https-only:8080")),
         ];

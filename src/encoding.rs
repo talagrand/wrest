@@ -409,13 +409,12 @@ fn decode_iso_8859_16(data: &[u8]) -> String {
 fn decode_utf16le(data: &[u8]) -> Result<String, Error> {
     // Strip BOM if present
     let data = data.strip_prefix(&[0xFF, 0xFE]).unwrap_or(data);
+    if !data.len().is_multiple_of(2) {
+        return Err(Error::decode("invalid UTF-16LE: odd byte count"));
+    }
     let words: Vec<u16> = data
-        .chunks(2)
-        .map(|c| match c {
-            [lo, hi] => u16::from_le_bytes([*lo, *hi]),
-            [lo] => u16::from_le_bytes([*lo, 0]),
-            _ => unreachable!("chunks(2) yields 1 or 2 elements"),
-        })
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
     crate::util::string_from_utf16(&words, "invalid UTF-16LE")
 }
@@ -423,13 +422,12 @@ fn decode_utf16le(data: &[u8]) -> Result<String, Error> {
 /// Decode a UTF-16BE byte stream.
 fn decode_utf16be(data: &[u8]) -> Result<String, Error> {
     let data = data.strip_prefix(&[0xFE, 0xFF]).unwrap_or(data);
+    if !data.len().is_multiple_of(2) {
+        return Err(Error::decode("invalid UTF-16BE: odd byte count"));
+    }
     let words: Vec<u16> = data
-        .chunks(2)
-        .map(|c| match c {
-            [hi, lo] => u16::from_be_bytes([*hi, *lo]),
-            [hi] => u16::from_be_bytes([*hi, 0]),
-            _ => unreachable!("chunks(2) yields 1 or 2 elements"),
-        })
+        .chunks_exact(2)
+        .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .collect();
     crate::util::string_from_utf16(&words, "invalid UTF-16BE")
 }
@@ -613,9 +611,6 @@ mod tests {
             // BOM stripping
             ("utf-16le", &[0xFF, 0xFE, 0x41, 0x00], "A", "LE BOM stripped"),
             ("utf-16be", &[0xFE, 0xFF, 0x00, 0x41], "A", "BE BOM stripped"),
-            // Odd-length input: trailing byte zero-padded
-            ("utf-16le", &[0x41, 0x00, 0x42], "AB", "LE odd byte → zero-padded"),
-            ("utf-16be", &[0x00, 0x41, 0x42], "A\u{4200}", "BE odd byte → zero-padded"),
         ];
 
         for &(charset, data, expected, desc) in cases {
@@ -627,9 +622,15 @@ mod tests {
     #[test]
     fn utf16_errors_table() {
         // Lone surrogates → error (from_utf16 rejects them).
+        // Odd byte count → error (structurally invalid UTF-16).
         let cases: &[(&str, &[u8], &str)] = &[
             ("utf-16le", &[0x00, 0xD8], "LE lone high surrogate"),
             ("utf-16be", &[0xD8, 0x00], "BE lone high surrogate"),
+            ("utf-16le", &[0x41, 0x00, 0x42], "LE odd byte count"),
+            ("utf-16be", &[0x00, 0x41, 0x42], "BE odd byte count"),
+            // BOM stripping leaves odd remainder → still invalid.
+            ("utf-16le", &[0xFF, 0xFE, 0x42], "LE BOM + odd remainder"),
+            ("utf-16be", &[0xFE, 0xFF, 0x00], "BE BOM + odd remainder"),
         ];
 
         for &(charset, data, desc) in cases {

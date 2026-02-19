@@ -206,4 +206,30 @@ mod tests {
     fn read_env_var_unset() {
         assert!(read_env_var("wrest_TEST_NONEXISTENT_VAR_12345").is_none());
     }
+
+    #[test]
+    fn lock_or_clear_recovers_from_poison() {
+        use std::sync::{Arc, Mutex};
+
+        let mutex = Arc::new(Mutex::new(42_i32));
+        let m2 = Arc::clone(&mutex);
+
+        // Poison the mutex by panicking while holding the lock.
+        let _ = std::thread::spawn(move || {
+            let _guard = m2.lock().unwrap();
+            panic!("intentional panic to poison mutex");
+        })
+        .join();
+
+        // The mutex is now poisoned.
+        assert!(mutex.lock().is_err(), "mutex should be poisoned");
+
+        // lock_or_clear recovers and returns a valid guard.
+        let guard = lock_or_clear(&mutex);
+        assert_eq!(*guard, 42);
+        drop(guard);
+
+        // After recovery, the poison flag is cleared.
+        assert!(mutex.lock().is_ok(), "poison should be cleared");
+    }
 }

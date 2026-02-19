@@ -52,7 +52,11 @@ pub(crate) enum ErrorKind {
     /// Response body decoding error (JSON deserialization, charset conversion).
     Decode,
     /// Upgrade error.
-    #[expect(dead_code, reason = "API compat: WinHTTP handles protocol upgrades")]
+    ///
+    /// Not constructed by the native WinHTTP backend (protocol upgrades
+    /// are handled transparently), but kept for API compatibility with
+    /// reqwest.
+    #[cfg_attr(not(test), expect(dead_code))]
     Upgrade,
 }
 
@@ -364,6 +368,17 @@ mod tests {
             ("builder", Error::builder("bad config"), "builder error"),
             ("decode", Error::decode("invalid json"), "error decoding response body"),
             (
+                "upgrade",
+                Error {
+                    kind: ErrorKind::Upgrade,
+                    message: String::new(),
+                    source: None,
+                    status: None,
+                    url: None,
+                },
+                "error upgrading connection",
+            ),
+            (
                 "status_client",
                 Error {
                     kind: ErrorKind::Status,
@@ -392,28 +407,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn error_query_methods() {
-        let connect_err = Error::builder("test");
-        assert!(!connect_err.is_connect());
-        assert!(!connect_err.is_timeout());
-        assert!(!connect_err.is_status());
-        assert!(connect_err.status().is_none());
-        assert!(connect_err.url().is_none());
-
-        let url = "https://example.com/missing".into_url().unwrap();
-        let status_err = Error {
-            kind: ErrorKind::Status,
-            message: "404".into(),
-            source: None,
-            status: Some(StatusCode::NOT_FOUND),
-            url: Some(Box::new(url)),
-        };
-        assert!(status_err.is_status());
-        assert_eq!(status_err.status(), Some(StatusCode::NOT_FOUND));
-        assert_eq!(status_err.url().map(|u| u.as_str()), Some("https://example.com/missing"));
-    }
-
     /// Each `ErrorKind` has exactly one `is_*` query method that returns
     /// `true`; all other `is_*` methods return `false`.
     #[test]
@@ -422,13 +415,24 @@ mod tests {
         // The table itself doubles as the cross-check matrix: for each
         // error we call every other entry's function pointer and verify
         // only the designated one fires.
-        #[expect(clippy::type_complexity)]
-        let cases: &[(Error, &str, fn(&Error) -> bool)] = &[
+        type TestCase<'a> = (Error, &'a str, fn(&Error) -> bool);
+        let cases: &[TestCase] = &[
             (Error::builder("b"), "builder", Error::is_builder),
             (Error::request("r"), "request", Error::is_request),
             (Error::timeout("t"), "timeout", Error::is_timeout),
             (Error::body("d"), "body", Error::is_body),
             (Error::decode("d"), "decode", Error::is_decode),
+            (
+                Error {
+                    kind: ErrorKind::Upgrade,
+                    message: "u".into(),
+                    source: None,
+                    status: None,
+                    url: None,
+                },
+                "upgrade",
+                Error::is_upgrade,
+            ),
             (
                 Error {
                     kind: ErrorKind::Connect,
@@ -445,8 +449,8 @@ mod tests {
                     kind: ErrorKind::Status,
                     message: "s".into(),
                     source: None,
-                    status: Some(StatusCode::IM_A_TEAPOT),
-                    url: None,
+                    status: Some(StatusCode::NOT_FOUND),
+                    url: Some(Box::new("https://example.com/missing".into_url().unwrap())),
                 },
                 "status",
                 Error::is_status,
@@ -475,6 +479,16 @@ mod tests {
                 }
             }
         }
+
+        // Verify status() and url() accessors on the Status entry.
+        let status_err = &cases.iter().find(|(_, l, _)| *l == "status").unwrap().0;
+        assert_eq!(status_err.status(), Some(StatusCode::NOT_FOUND));
+        assert_eq!(status_err.url().map(|u| u.as_str()), Some("https://example.com/missing"));
+
+        // Non-status errors return None for both.
+        let builder_err = &cases[0].0;
+        assert!(builder_err.status().is_none());
+        assert!(builder_err.url().is_none());
     }
 
     #[test]
@@ -570,8 +584,8 @@ mod tests {
     #[test]
     fn from_win32_table() {
         // (code, label, kind check, expected io::ErrorKind or None)
-        #[expect(clippy::type_complexity)]
-        let cases: &[(u32, &str, fn(&Error) -> bool, Option<io::ErrorKind>)] = &[
+        type TestCase<'a> = (u32, &'a str, fn(&Error) -> bool, Option<io::ErrorKind>);
+        let cases: &[TestCase] = &[
             (
                 ERROR_WINHTTP_CANNOT_CONNECT,
                 "connect",

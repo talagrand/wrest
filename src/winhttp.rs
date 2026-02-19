@@ -904,26 +904,20 @@ pub(crate) async fn read_chunk(
     const READ_BUF_SIZE: usize = 8192;
     let buf = BytesMut::with_capacity(READ_BUF_SIZE);
 
-    // Store the buffer in the state so it outlives the async callback (cancellation safety).
+    // Read data -- the buffer is moved into the closure and stored in
+    // shared state for cancellation safety.  `Option::insert` returns
+    // `&mut BytesMut`, so the pointer is derived within the same lock
+    // scope that placed the buffer -- no Option check needed.
     //
-    // Safe to recover from poison: `read_buffer` is an `Option<BytesMut>`
-    // slot -- only assignment / `.take()`, no multi-field invariant.
-    *lock_or_clear(&state.read_buffer) = Some(buf);
-
-    // Read data -- buf_ptr is computed inside the closure to avoid holding
-    //    a raw pointer across the await point (which would make the future !Send).
+    // The raw pointer is computed inside the closure to avoid holding it
+    // across the await point (which would make the future !Send).
     let h_read = handle.as_send();
     let read = await_win32(&state.signal, move || {
         let (buf_ptr, buf_capacity) = {
             // Safe to recover from poison: `read_buffer` is an
             // `Option<BytesMut>` slot -- no multi-field invariant.
             let mut guard = lock_or_clear(&state.read_buffer);
-            // Destructure: buffer was stored immediately before this
-            // closure runs. If missing, surface as Err, not a panic.
-            let Some(buf_ref) = guard.as_mut() else {
-                return Err(Error::request("read buffer missing (invariant violated)")
-                    .with_url(url.clone()));
-            };
+            let buf_ref = guard.insert(buf);
             let spare = buf_ref.spare_capacity_mut();
             (spare.as_ptr() as *mut std::ffi::c_void, spare.len() as u32)
         };
@@ -942,7 +936,8 @@ pub(crate) async fn read_chunk(
     //
     // Safe to recover from poison: `read_buffer` is an `Option<BytesMut>`
     // slot -- just `.take()`, no multi-field invariant.
-    let Some(mut buf) = lock_or_clear(&state.read_buffer).take() else {
+    let mut guard = lock_or_clear(&state.read_buffer);
+    let Some(mut buf) = guard.take() else {
         return Err(Error::request("read buffer missing after read (invariant violated)")
             .with_url(url.clone()));
     };
@@ -1397,8 +1392,8 @@ mod tests {
 
         // (event, expected_outcome)
         // Ok(()) for success, Err("kind") for which is_* should be true
-        #[expect(clippy::type_complexity)]
-        let cases: Vec<(CallbackEvent, Result<(), fn(&Error) -> bool>)> = vec![
+        type TestCase = (CallbackEvent, Result<(), fn(&Error) -> bool>);
+        let cases: Vec<TestCase> = vec![
             (CallbackEvent::Complete, Ok(())),
             (CallbackEvent::Win32Error(ERROR_WINHTTP_TIMEOUT), Err(Error::is_timeout)),
             (CallbackEvent::ReadComplete(42), Err(Error::is_request)),
@@ -1425,14 +1420,14 @@ mod tests {
         let url: Url = "https://example.com".parse().unwrap();
 
         // (method_name, happy_event, happy_value, wrong_variant_event)
-        #[expect(clippy::type_complexity)]
-        let cases: Vec<(
-            &str,
+        type TestCase<'a> = (
+            &'a str,
             fn(CallbackEvent, &Url) -> crate::Result<u32>,
             CallbackEvent,
             u32,
             CallbackEvent,
-        )> = vec![
+        );
+        let cases: Vec<TestCase<'_>> = vec![
             (
                 "into_read_complete",
                 |e, u| e.into_read_complete(u),
@@ -1513,10 +1508,10 @@ mod tests {
     // -- parse_raw_headers --
 
     #[test]
-    #[expect(clippy::type_complexity)]
     fn parse_raw_headers_table() {
         // (raw_input, expected_headers_as (name, value) pairs, label)
-        let cases: &[(&str, &[(&str, &str)], &str)] = &[
+        type TestCase<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a str);
+        let cases: &[TestCase] = &[
             ("", &[], "empty input"),
             ("HTTP/1.1 200 OK\r\n", &[], "status line only"),
             (

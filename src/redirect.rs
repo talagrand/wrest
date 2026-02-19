@@ -69,8 +69,8 @@ mod tests {
     #[test]
     fn policy_construction() {
         // (label, policy, expected_inner_match)
-        #[expect(clippy::type_complexity)]
-        let cases: Vec<(&str, Policy, fn(&PolicyInner) -> bool)> = vec![
+        type TestCase<'a> = (&'a str, Policy, fn(&PolicyInner) -> bool);
+        let cases: Vec<TestCase<'_>> = vec![
             ("limited(5)", Policy::limited(5), |p| matches!(p, PolicyInner::Limited(5))),
             ("none", Policy::none(), |p| matches!(p, PolicyInner::None)),
             ("default", Policy::default(), |p| matches!(p, PolicyInner::Limited(10))),

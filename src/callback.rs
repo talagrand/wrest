@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn signal_before_poll_still_works() {
-        let signal = CompletionSignal::<u32>::new();
+        let signal: CompletionSignal<u32> = Default::default();
         let future = signal.listen();
         signal.signal(7); // Signal before the future is polled
         assert_eq!(futures_executor::block_on(future), Ok(7));
@@ -311,5 +311,21 @@ mod tests {
             Ok::<(), TestError>(())
         }));
         assert_eq!(result, Ok(99));
+    }
+
+    /// Dropping the `CompletionSignal` after `start_op` succeeds but
+    /// before the future resolves triggers the `From<SignalCancelled>`
+    /// conversion.
+    #[test]
+    fn await_win32_cancelled_signal() {
+        let signal = CompletionSignal::<u32>::new();
+        let future = signal.listen();
+        // Drop the signal without calling .signal() — the sender is gone.
+        drop(signal);
+        // The future resolves to Err(SignalCancelled), which converts
+        // via From<SignalCancelled> into TestError::Cancelled.
+        let result: Result<u32, TestError> =
+            futures_executor::block_on(async { future.await.map_err(TestError::from) });
+        assert_eq!(result, Err(TestError::Cancelled));
     }
 }

@@ -943,6 +943,21 @@ mod tests {
         // This actually opens a WinHTTP session
         let client = Client::builder().build();
         assert!(client.is_ok());
+
+        // Durations larger than i32::MAX ms (~24.8 days) saturate
+        // rather than wrapping (covers `unwrap_or` in `to_ms`).
+        let huge = Duration::from_millis(u64::from(i32::MAX as u32) + 1);
+        assert!(Client::builder().connect_timeout(huge).build().is_ok());
+
+        // Redirect policies: exercises the WinHTTP session option arms.
+        use crate::redirect::Policy;
+        assert!(Client::builder().redirect(Policy::none()).build().is_ok());
+        assert!(
+            Client::builder()
+                .redirect(Policy::limited(5))
+                .build()
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1115,12 +1130,9 @@ mod tests {
     #[test]
     fn builder_field_storage_table() {
         // (label, setup, check)
-        #[expect(clippy::type_complexity)]
-        let cases: &[(
-            &str,
-            fn(ClientBuilder) -> ClientBuilder,
-            fn(&ClientBuilder) -> bool,
-        )] = &[
+        type TestCase<'a> =
+            (&'a str, fn(ClientBuilder) -> ClientBuilder, fn(&ClientBuilder) -> bool);
+        let cases: &[TestCase] = &[
             (
                 "send_timeout",
                 |b| b.send_timeout(Duration::from_secs(5)),

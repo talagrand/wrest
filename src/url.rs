@@ -160,11 +160,13 @@ impl Url {
             // Absolute path -- replace path entirely
             input.to_owned()
         } else {
-            // Relative path -- resolve against current path's directory
-            let base_path = match self.path.rfind('/') {
-                Some(pos) => self.path.get(..=pos).unwrap_or("/"),
-                None => "/",
-            };
+            // Relative path -- resolve against current path's directory.
+            // `parse_impl` guarantees `path` starts with '/', so
+            // `rfind('/')` always succeeds; `unwrap_or(0)` gives the
+            // same "/" prefix when the invariant holds and a safe
+            // fallback if it ever didn't.
+            let last_slash = self.path.rfind('/').unwrap_or(0);
+            let base_path = &self.path[..=last_slash];
             format!("{base_path}{input}")
         };
 
@@ -387,7 +389,7 @@ impl Url {
             raw_path
         };
 
-        let (query, _) = parse_extra(&extra);
+        let query = extract_query_from_extra(&extra);
 
         // path_and_query excludes the fragment -- WinHTTP does not send it.
         let path_and_query = if extra.is_empty() {
@@ -401,11 +403,11 @@ impl Url {
         // WinHttpCrackUrl with ICU_ESCAPE normalises path/query encoding;
         // using the original input would leave `as_str()` returning the
         // raw string while `path()` returns the encoded version (QOI-4).
-        let mut serialized = format!("{scheme_lower}://{host}");
-        if explicit_port {
-            use std::fmt::Write;
-            write!(serialized, ":{port}").expect("write to String is infallible");
-        }
+        let mut serialized = if explicit_port {
+            format!("{scheme_lower}://{host}:{port}")
+        } else {
+            format!("{scheme_lower}://{host}")
+        };
         serialized.push_str(&path_and_query);
         if let Some(ref frag) = fragment {
             serialized.push('#');
@@ -434,16 +436,13 @@ impl Url {
     /// `serialized` to stay consistent with the other fields.
     #[cfg_attr(all(not(feature = "query"), not(test)), expect(dead_code))]
     pub(crate) fn set_query_string(&mut self, query: String) {
+        self.path_and_query = format!("{}?{query}", self.path);
         self.query = Some(query);
-        self.path_and_query = match &self.query {
-            Some(q) => format!("{}?{q}", self.path),
-            None => self.path.clone(),
+        let mut serialized = if self.explicit_port {
+            format!("{}://{}:{}", self.scheme, self.host, self.port)
+        } else {
+            format!("{}://{}", self.scheme, self.host)
         };
-        let mut serialized = format!("{}://{}", self.scheme, self.host);
-        if self.explicit_port {
-            use std::fmt::Write;
-            write!(serialized, ":{}", self.port).expect("write to String is infallible");
-        }
         serialized.push_str(&self.path_and_query);
         if let Some(ref frag) = self.fragment {
             serialized.push('#');
@@ -569,47 +568,22 @@ fn remove_dot_segments(path: &str) -> String {
     result
 }
 
-/// Decompose the "extra info" string from `WinHttpCrackUrl` into optional
-/// query and fragment components.
+/// Extract the query string from the "extra info" returned by
+/// `WinHttpCrackUrl`.
 ///
-/// The extra info contains everything after the URL path:
-///   `?key=val&a=b#section`  ->  query=`Some("key=val&a=b")`, fragment=`Some("section")`
-///   `#section`              ->  query=`None`, fragment=`Some("section")`
-///   `?key=val`              ->  query=`Some("key=val")`, fragment=`None`
-///   (empty)                 ->  query=`None`, fragment=`None`
-fn parse_extra(extra: &str) -> (Option<String>, Option<String>) {
-    if extra.is_empty() {
-        return (None, None);
-    }
-
-    // Split at the first '#' to separate the fragment.
-    let (before_frag, fragment) = match extra.find('#') {
-        Some(pos) => {
-            let frag = extra.get(pos + 1..).unwrap_or("");
-            (
-                extra.get(..pos).unwrap_or(""),
-                if frag.is_empty() {
-                    None
-                } else {
-                    Some(frag.to_owned())
-                },
-            )
-        }
-        None => (extra, None),
-    };
-
-    // Extract query (everything after the leading '?').
-    let query = if let Some(q) = before_frag.strip_prefix('?') {
-        if q.is_empty() {
-            None
-        } else {
-            Some(q.to_owned())
-        }
-    } else {
+/// The extra info contains everything after the URL path. Because
+/// `parse_impl` strips the fragment *before* calling `WinHttpCrackUrl`,
+/// the extra info only ever contains an optional query string:
+///   `?key=val&a=b`  ->  `Some("key=val&a=b")`
+///   `?`             ->  `None`
+///   (empty)         ->  `None`
+fn extract_query_from_extra(extra: &str) -> Option<String> {
+    let q = extra.strip_prefix('?')?;
+    if q.is_empty() {
         None
-    };
-
-    (query, fragment)
+    } else {
+        Some(q.to_owned())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -793,9 +767,9 @@ mod tests {
             ("https://example.com/page#section", "/page", None, Some("section")),
             ("https://example.com/search?q=test", "/search", Some("q=test"), None),
             ("https://example.com/path", "/path", None, None),
-            // Fragment only, no query -- covers parse_extra fragment-no-query branch
+            // Fragment only, no query
             ("https://example.com/#frag", "/", None, Some("frag")),
-            // Query and fragment -- covers full parse_extra path
+            // Query and fragment
             ("https://example.com/?q=1#sect", "/", Some("q=1"), Some("sect")),
             // Empty fragment (hash only) -- covers frag.is_empty() -> None
             ("https://example.com/page#", "/page", None, None),
@@ -803,6 +777,10 @@ mod tests {
             ("https://example.com/page?", "/page", None, None),
             // Both empty -- covers both empty branches
             ("https://example.com/page?#", "/page", None, None),
+            // Query present + empty fragment -- covers frag.is_empty() with query
+            ("https://example.com/path?q=1#", "/path", Some("q=1"), None),
+            // Empty query + fragment present -- covers q.is_empty() with frag
+            ("https://example.com/path?#frag", "/path", None, Some("frag")),
         ];
 
         for &(input, path, query, fragment) in cases {
@@ -945,6 +923,8 @@ mod tests {
             ("https://user%41%62:p%4Fss@example.com/", "userAb", Some("pOss")),
             // Lowercase hex a-f: %5A='Z', %6a='j' -- covers hex_nibble a-f branch
             ("https://%5A%6a@example.com/", "Zj", None),
+            // Invalid hex -- %GG passes through literally (covers hex_nibble None)
+            ("http://user%GG:pass@example.com/path", "user%GG", Some("pass")),
         ];
 
         for &(input, username, password) in cases {

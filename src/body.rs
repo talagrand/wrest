@@ -248,25 +248,28 @@ mod tests {
         assert!(s.contains("stream"), "should mention stream: {s}");
     }
 
+    /// `into_bytes` covers both the `Bytes` variant (zero-copy) and
+    /// the `Stream` variant (buffered read), plus stream-error propagation.
     #[test]
-    fn body_stream_into_bytes() {
+    fn into_bytes_variants() {
+        // Bytes variant (zero-copy path)
+        let body = Body::from(vec![1, 2, 3]);
+        assert_eq!(futures_executor::block_on(body.into_bytes()).unwrap(), vec![1, 2, 3]);
+
+        // Stream variant (buffered read)
         let stream = futures_util::stream::iter(vec![
             Ok::<_, std::io::Error>(Bytes::from("hello ")),
             Ok(Bytes::from("world")),
         ]);
         let body = Body::wrap_stream(stream);
-        let bytes = futures_executor::block_on(body.into_bytes()).unwrap();
-        assert_eq!(bytes, b"hello world");
-    }
+        assert_eq!(futures_executor::block_on(body.into_bytes()).unwrap(), b"hello world");
 
-    #[test]
-    fn body_stream_error_propagated() {
+        // Stream error propagation
         let stream = futures_util::stream::iter(vec![
             Ok::<Bytes, std::io::Error>(Bytes::from("ok")),
             Err(std::io::Error::other("fail")),
         ]);
         let body = Body::wrap_stream(stream);
-        let result = futures_executor::block_on(body.into_bytes());
-        assert!(result.is_err());
+        assert!(futures_executor::block_on(body.into_bytes()).is_err());
     }
 }
