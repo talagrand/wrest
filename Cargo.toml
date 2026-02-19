@@ -12,6 +12,10 @@ categories = ["web-programming::http-client"]
 repository = "https://github.com/talagrand/wrest"
 exclude = ["docs/http3.md", "docs/parity-gaps.md", ".github/"]
 
+# build.rs emits `native_winhttp` when on Windows without `always-reqwest`.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(native_winhttp)"] }
+
 [package.metadata.docs.rs]
 default-target = "x86_64-pc-windows-msvc"
 targets = ["x86_64-pc-windows-msvc"]
@@ -34,7 +38,102 @@ implicit_clone = "warn"
 expl_impl_clone_on_copy = "warn"
 
 [features]
-default = []
+default = ["default-tls", "charset", "http2", "system-proxy"]
+
+# -- reqwest-compatible capability features (no-op on native) ------
+
+## Improved support for decoding text.
+##
+## wrest natively supports all 39 WHATWG encodings via Win32
+## `MultiByteToWideChar` (plus ICU and a lookup table for edge cases),
+## so this feature is a no-op on the native backend.  On the reqwest
+## backend it forwards to `reqwest/charset`.
+charset     = ["reqwest?/charset"]
+
+## Enables HTTP/2 support.
+##
+## WinHTTP negotiates HTTP/2 via ALPN automatically (Windows 10 1607+),
+## so this feature is a no-op on the native backend.  On the reqwest
+## backend it forwards to `reqwest/http2`.
+http2       = ["reqwest?/http2"]
+
+## Provides TLS support to connect over HTTPS.
+##
+## WinHTTP always uses the OS TLS stack (SChannel), so this feature
+## is a no-op on the native backend.  On the reqwest backend it
+## forwards to `reqwest/default-tls`.
+default-tls = ["reqwest?/default-tls"]
+
+## Use the OS-native TLS stack (SChannel on Windows).
+##
+## This is always the case for wrest's native backend, so the feature
+## just makes the default explicit.  On the reqwest backend it
+## forwards to `reqwest/native-tls`.
+native-tls  = ["reqwest?/native-tls"]
+
+## Automatic system proxy detection.
+##
+## WinHTTP uses `WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` (WPAD/PAC +
+## system settings) by default, so this feature is a no-op on the
+## native backend.  On the reqwest backend it forwards to
+## `reqwest/system-proxy`.
+system-proxy = ["reqwest?/system-proxy"]
+
+# -- Serialization features (real implementation on both backends) ---
+
+## Enables `RequestBuilder::json()` and `Response::json()`.
+json  = ["dep:serde", "dep:serde_json",                    "reqwest?/json"]
+
+## Enables `RequestBuilder::form()`.
+form  = ["dep:serde", "dep:serde_json", "dep:form_urlencoded", "reqwest?/form"]
+
+## Enables `RequestBuilder::query()`.
+query = ["dep:serde", "dep:serde_json", "dep:form_urlencoded", "reqwest?/query"]
+
+# -- Decompression toggles (no-op on native, forwarded to reqwest) --
+
+## Enables `ClientBuilder::gzip()` and automatic gzip decompression.
+##
+## WinHTTP always decompresses gzip automatically, so the builder
+## method is a no-op on the native backend (requires `noop-compat`
+## to expose).  On the reqwest backend this forwards to
+## `reqwest/gzip`.
+gzip    = ["reqwest?/gzip"]
+
+## Enables `ClientBuilder::deflate()` and automatic deflate decompression.
+##
+## WinHTTP always decompresses deflate automatically, so the builder
+## method is a no-op on the native backend (requires `noop-compat`
+## to expose).  On the reqwest backend this forwards to
+## `reqwest/deflate`.
+deflate = ["reqwest?/deflate"]
+
+## Enables `ClientBuilder::brotli()` and automatic brotli decompression.
+##
+## WinHTTP does not decompress brotli natively, so the builder method
+## is a no-op on the native backend (requires `noop-compat` to
+## expose).  On the reqwest backend this forwards to
+## `reqwest/brotli`.
+brotli  = ["reqwest?/brotli"]
+
+## Enables `ClientBuilder::zstd()` and automatic zstd decompression.
+##
+## WinHTTP does not decompress zstd natively, so the builder method
+## is a no-op on the native backend (requires `noop-compat` to
+## expose).  On the reqwest backend this forwards to
+## `reqwest/zstd`.
+zstd    = ["reqwest?/zstd"]
+
+# -- Streaming ------------------------------------------------------
+
+## Enables `Stream`-based request/response body support.
+##
+## wrest always supports streaming internally, so this feature is a
+## no-op on the native backend.  On the reqwest backend it forwards
+## to `reqwest/stream`.
+stream  = ["reqwest?/stream"]
+
+# -- Diagnostics & compatibility ------------------------------------
 
 ## Enables diagnostic logging via the [`tracing`](https://docs.rs/tracing) crate.
 ##
@@ -42,38 +141,34 @@ default = []
 ## connection callbacks (DNS, connect, redirect, bytes sent/received)
 ## and `warn!`/`debug!` for internal edge cases.  Without a
 ## `tracing` subscriber these are zero-cost no-ops.
-tracing = ["dep:tracing"]
+tracing          = ["dep:tracing"]
 
 ## Enables no-op reqwest compatibility stubs.
 ##
 ## When enabled, wrest exposes methods like
-## `ClientBuilder::gzip()`, `tcp_nodelay()`, `pool_idle_timeout()`, etc.
-## that accept and ignore their arguments.  This lets code written
-## against reqwest compile without changes.  Disable this feature if
-## you prefer compile-time detection of unsupported API usage.
-noop-compat = []
+## `ClientBuilder::tcp_nodelay()`, `pool_idle_timeout()`,
+## `http2_prior_knowledge()`, etc. that accept and ignore their
+## arguments.  This lets code written against reqwest compile without
+## changes.  Disable this feature if you prefer compile-time detection
+## of unsupported API usage.
+##
+## Decompression toggles (`gzip()`, `deflate()`, `brotli()`, `zstd()`)
+## require both this feature *and* the corresponding decompression
+## feature (e.g. `features = ["noop-compat", "gzip"]`).
+noop-compat      = []
 
 ## Enables `Client::new()` and `impl Default for Client`, which panic on
-## failure.  Disabled by default — prefer `Client::builder().build()` for
+## failure.  Disabled by default -- prefer `Client::builder().build()` for
 ## fallible construction.  Provided for reqwest API compatibility.
 panicking-compat = []
 
-## Enables `RequestBuilder::json()` and `Response::json()`.
-json = ["dep:serde", "dep:serde_json"]
+# -- Backend selection ----------------------------------------------
 
-## Enables `RequestBuilder::form()`.
-form = ["dep:serde", "dep:serde_json", "dep:form_urlencoded"]
-
-## Enables `RequestBuilder::query()`.
-query = ["dep:serde", "dep:serde_json", "dep:form_urlencoded"]
+## Forces the reqwest backend even on Windows.  Useful for A/B testing
+## wrest's native WinHTTP backend against reqwest.
+always-reqwest   = ["dep:reqwest"]
 
 [dependencies]
-windows-sys = { version = ">=0.59, <0.62", default-features = false, features = [
-    "Win32_Foundation",
-    "Win32_Globalization",
-    "Win32_Networking_WinHttp",
-    "Win32_System_LibraryLoader",
-] }
 futures-core = "0.3.31"
 futures-channel = "0.3.31"
 futures-util = "0.3.31"
@@ -85,6 +180,19 @@ base64 = "0.22"
 tracing = { version = "0.1.40", default-features = false, features = ["std"], optional = true }
 http = "1"
 bytes = "1.11.1"
+reqwest = { version = "0.13", optional = true, default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = ">=0.59, <0.62", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Networking_WinHttp",
+    "Win32_System_LibraryLoader",
+] }
+
+# On non-Windows platforms, reqwest is always used as the HTTP backend.
+[target.'cfg(not(windows))'.dependencies]
+reqwest = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 futures-executor = "0.3.31"

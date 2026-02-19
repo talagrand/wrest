@@ -8,52 +8,78 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  MSRV: '1.90'
+  # Every user-facing feature except always-reqwest.
+  NATIVE_FEATURES: charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream
 
 jobs:
   test:
-    name: Test Suite
-    runs-on: windows-latest
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        rust-version: ['1.90', 'stable']
-        cargo-args:
-          - '--no-default-features'
-          - '--no-default-features --features noop-compat'
-          - '--no-default-features --features json'
-          - '--no-default-features --features form'
-          - '--no-default-features --features query'
-          - '--all-features'
+        include:
+          # -- Windows - native WinHTTP backend -----------------------
+          - { name: 'win / msrv / no-defaults',   os: windows-latest, rust: msrv,   mode: no-defaults }
+          - { name: 'win / msrv / defaults',       os: windows-latest, rust: msrv,   mode: defaults }
+          - { name: 'win / stable / no-defaults',  os: windows-latest, rust: stable, mode: no-defaults }
+          - { name: 'win / stable / all-native',   os: windows-latest, rust: stable, mode: all, doc-tests: true }
+          # -- Windows - reqwest backend (via always-reqwest) ---------
+          - { name: 'win / stable / reqwest',      os: windows-latest, rust: stable, mode: all-reqwest }
+          # -- Linux - reqwest backend (implicit, no always-reqwest needed)
+          - { name: 'linux / msrv / no-defaults',  os: ubuntu-latest,  rust: msrv,   mode: no-defaults }
+          - { name: 'linux / msrv / defaults',      os: ubuntu-latest,  rust: msrv,   mode: defaults }
+          - { name: 'linux / stable / no-defaults', os: ubuntu-latest,  rust: stable, mode: no-defaults }
+          - { name: 'linux / stable / all',         os: ubuntu-latest,  rust: stable, mode: all }
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
 
+    - name: Resolve matrix parameters
+      id: resolve
+      shell: bash
+      run: |
+        # Toolchain
+        rust="${{ matrix.rust }}"
+        [[ "$rust" == "msrv" ]] && rust="$MSRV"
+        echo "toolchain=$rust" >> "$GITHUB_OUTPUT"
+
+        # Cargo feature flags
+        case "${{ matrix.mode }}" in
+          no-defaults)  echo "flags=--no-default-features" ;;
+          defaults)     echo "flags=" ;;
+          all)          echo "flags=--features $NATIVE_FEATURES" ;;
+          all-reqwest)  echo "flags=--features $NATIVE_FEATURES,always-reqwest" ;;
+        esac >> "$GITHUB_OUTPUT"
+
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: ${{ matrix.rust-version }}
+        toolchain: ${{ steps.resolve.outputs.toolchain }}
 
-    - name: Install clippy (stable only)
-      if: matrix.rust-version == 'stable'
+    - name: Install clippy
+      if: matrix.rust == 'stable'
       run: rustup component add clippy
 
     - name: Cache dependencies
       uses: Swatinem/rust-cache@v2
 
     - name: Run tests
-      run: cargo test --all-targets ${{ matrix.cargo-args }} --verbose
+      run: cargo test --all-targets ${{ steps.resolve.outputs.flags }} --verbose
 
     - name: Run clippy
-      if: matrix.rust-version == 'stable'
-      run: cargo clippy --all-targets ${{ matrix.cargo-args }} -- -D warnings
+      if: matrix.rust == 'stable'
+      run: cargo clippy --all-targets ${{ steps.resolve.outputs.flags }} -- -D warnings
 
-    - name: Run doc tests (all features)
-      run: cargo test --doc --all-features
+    - name: Run doc tests
+      if: matrix.doc-tests
+      run: cargo test --doc --features ${{ env.NATIVE_FEATURES }}
 
   fmt:
     name: Formatting
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
 
     steps:
     - name: Checkout code
@@ -104,7 +130,7 @@ jobs:
       uses: Swatinem/rust-cache@v2
 
     - name: Generate coverage
-      run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+      run: cargo llvm-cov --features ${{ env.NATIVE_FEATURES }} --lcov --output-path lcov.info
 
     - name: Upload to Codecov
       uses: codecov/codecov-action@v5
@@ -116,7 +142,7 @@ jobs:
 
   security:
     name: Security Audit
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
 
     steps:
     - name: Checkout code

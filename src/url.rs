@@ -280,7 +280,7 @@ impl TryFrom<String> for Url {
 ///
 /// This trait is `pub` inside the crate but is **not** re-exported from the
 /// crate root, so external callers cannot import it and therefore cannot
-/// call `into_url()` directly — matching `reqwest::into_url::IntoUrlSealed`.
+/// call `into_url()` directly -- matching `reqwest::into_url::IntoUrlSealed`.
 ///
 /// It also serves as a seal: because external crates cannot name
 /// `IntoUrlSealed`, they cannot implement [`IntoUrl`].
@@ -292,9 +292,9 @@ pub trait IntoUrlSealed {
 /// A trait for types that can be converted to a validated URL.
 ///
 /// Implemented for `&str`, `String`, and [`Url`].  Invalid URLs produce an
-/// [`Error`] at request-build time — not inside `send()`.
+/// [`Error`] at request-build time -- not inside `send()`.
 ///
-/// This trait is sealed — it cannot be implemented outside of `wrest`,
+/// This trait is sealed -- it cannot be implemented outside of `wrest`,
 /// matching `reqwest::IntoUrl`.  The `into_url()` method lives on the
 /// non-exported supertrait [`IntoUrlSealed`], so external callers cannot
 /// invoke it.
@@ -793,15 +793,15 @@ mod tests {
             ("https://example.com/page#section", "/page", None, Some("section")),
             ("https://example.com/search?q=test", "/search", Some("q=test"), None),
             ("https://example.com/path", "/path", None, None),
-            // Fragment only, no query — covers parse_extra fragment-no-query branch
+            // Fragment only, no query -- covers parse_extra fragment-no-query branch
             ("https://example.com/#frag", "/", None, Some("frag")),
-            // Query and fragment — covers full parse_extra path
+            // Query and fragment -- covers full parse_extra path
             ("https://example.com/?q=1#sect", "/", Some("q=1"), Some("sect")),
-            // Empty fragment (hash only) — covers frag.is_empty() -> None
+            // Empty fragment (hash only) -- covers frag.is_empty() -> None
             ("https://example.com/page#", "/page", None, None),
-            // Empty query (question mark only) — covers q.is_empty() -> None
+            // Empty query (question mark only) -- covers q.is_empty() -> None
             ("https://example.com/page?", "/page", None, None),
-            // Both empty — covers both empty branches
+            // Both empty -- covers both empty branches
             ("https://example.com/page?#", "/page", None, None),
         ];
 
@@ -941,9 +941,9 @@ mod tests {
             ("https://user%40domain:p%3Ass@example.com/", "user@domain", Some("p:ss")),
             // Empty password (user:@)
             ("https://user:@example.com/", "user", Some("")),
-            // Uppercase hex A-F: %41='A', %4F='O' — covers hex_nibble A-F branch
+            // Uppercase hex A-F: %41='A', %4F='O' -- covers hex_nibble A-F branch
             ("https://user%41%62:p%4Fss@example.com/", "userAb", Some("pOss")),
-            // Lowercase hex a-f: %5A='Z', %6a='j' — covers hex_nibble a-f branch
+            // Lowercase hex a-f: %5A='Z', %6a='j' -- covers hex_nibble a-f branch
             ("https://%5A%6a@example.com/", "Zj", None),
         ];
 

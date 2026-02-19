@@ -438,9 +438,9 @@ impl ClientBuilder {
     /// # No-op -- reqwest compatibility
     ///
     /// WinHTTP handles content-encoding decompression automatically
-    /// and does not expose per-algorithm toggles.  Requires the
-    /// `noop-compat` feature.
-    #[cfg(feature = "noop-compat")]
+    /// and does not expose per-algorithm toggles.  Requires both the
+    /// `gzip` and `noop-compat` features.
+    #[cfg(all(feature = "noop-compat", feature = "gzip"))]
     #[must_use]
     pub fn gzip(self, _val: bool) -> Self {
         self
@@ -453,8 +453,8 @@ impl ClientBuilder {
     /// WinHTTP only decompresses gzip and deflate responses natively.
     /// Calling `brotli(true)` is accepted for API compatibility but
     /// **will not** cause brotli-encoded responses to be decompressed.
-    /// Requires the `noop-compat` feature.
-    #[cfg(feature = "noop-compat")]
+    /// Requires both the `brotli` and `noop-compat` features.
+    #[cfg(all(feature = "noop-compat", feature = "brotli"))]
     #[must_use]
     pub fn brotli(self, _val: bool) -> Self {
         self
@@ -465,9 +465,9 @@ impl ClientBuilder {
     /// # No-op -- reqwest compatibility
     ///
     /// WinHTTP handles content-encoding decompression automatically
-    /// and does not expose per-algorithm toggles.  Requires the
-    /// `noop-compat` feature.
-    #[cfg(feature = "noop-compat")]
+    /// and does not expose per-algorithm toggles.  Requires both the
+    /// `deflate` and `noop-compat` features.
+    #[cfg(all(feature = "noop-compat", feature = "deflate"))]
     #[must_use]
     pub fn deflate(self, _val: bool) -> Self {
         self
@@ -480,8 +480,8 @@ impl ClientBuilder {
     /// WinHTTP only decompresses gzip and deflate responses natively.
     /// Calling `zstd(true)` is accepted for API compatibility but
     /// **will not** cause zstd-encoded responses to be decompressed.
-    /// Requires the `noop-compat` feature.
-    #[cfg(feature = "noop-compat")]
+    /// Requires both the `zstd` and `noop-compat` features.
+    #[cfg(all(feature = "noop-compat", feature = "zstd"))]
     #[must_use]
     pub fn zstd(self, _val: bool) -> Self {
         self
@@ -1035,6 +1035,9 @@ mod tests {
     }
 
     /// All noop-compat builder stubs compile, return Self, and don't panic.
+    ///
+    /// Decompression toggles (`gzip`, `brotli`, `deflate`, `zstd`) are in
+    /// [`compression_builder_stubs`] -- they are gated by their own features.
     #[test]
     #[cfg(feature = "noop-compat")]
     fn noop_compat_builder_stubs() {
@@ -1052,11 +1055,6 @@ mod tests {
             .tcp_keepalive_interval(None)
             .tcp_keepalive_retries(3u32)
             .tcp_keepalive_retries(None)
-            // Decompression
-            .gzip(true)
-            .brotli(true)
-            .deflate(true)
-            .zstd(true)
             // HTTP/1 tuning
             .http09_responses()
             .http1_title_case_headers()
@@ -1087,6 +1085,28 @@ mod tests {
 
         // Verify the builder is still usable after all stubs.
         let client = builder.build();
+        assert!(client.is_ok(), "builder should still produce a valid client");
+    }
+
+    /// Decompression builder stubs compile, return Self, and don't panic.
+    ///
+    /// Each method is gated by both `noop-compat` and its own cargo
+    /// feature (`gzip`, `brotli`, `deflate`, `zstd`).
+    #[test]
+    #[cfg(all(
+        feature = "noop-compat",
+        feature = "gzip",
+        feature = "brotli",
+        feature = "deflate",
+        feature = "zstd"
+    ))]
+    fn compression_builder_stubs() {
+        let client = ClientBuilder::new()
+            .gzip(true)
+            .brotli(true)
+            .deflate(true)
+            .zstd(true)
+            .build();
         assert!(client.is_ok(), "builder should still produce a valid client");
     }
 

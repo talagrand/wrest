@@ -1163,7 +1163,7 @@ mod tests {
         let url: Url = format!("{}/large-ut", server.uri()).parse().unwrap();
         let proxy_config = ProxyConfig::none();
 
-        // 5 MiB body — exceeds the 4 MiB #[cfg(test)] threshold.
+        // 5 MiB body -- exceeds the 4 MiB #[cfg(test)] threshold.
         let body = crate::Body::from(vec![b'X'; 5 * 1024 * 1024]);
 
         let raw = execute_request(&session, &url, "POST", &[], Some(body), &proxy_config, false)
@@ -1214,7 +1214,7 @@ mod tests {
                 redirect_policy: Some(crate::redirect::Policy::none()),
                 src_path: "/rp-src",
                 redirect_to: Some("/rp-dst"),
-                dst_path: None, // not mounted — redirect should NOT be followed
+                dst_path: None, // not mounted -- redirect should NOT be followed
                 expected_status: 302,
             },
             Case {
@@ -1308,7 +1308,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        // Session-level: Named proxy (pointing at the same server — doesn't
+        // Session-level: Named proxy (pointing at the same server -- doesn't
         // matter because the per-request override will bypass it).
         let config = SessionConfig {
             user_agent: String::new(),

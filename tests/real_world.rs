@@ -117,7 +117,10 @@ async fn httpbin_redirect_chain() {
 }
 
 /// Test httpbin.org/gzip - real gzip compression
+// WinHTTP always sends `Accept-Encoding: gzip, deflate` and auto-decompresses;
+// reqwest only does this when its `gzip` feature is enabled.
 #[tokio::test]
+#[cfg(any(native_winhttp, feature = "gzip"))]
 async fn httpbin_gzip_decompression() {
     let client = test_client();
 
@@ -135,7 +138,9 @@ async fn httpbin_gzip_decompression() {
 }
 
 /// Test httpbin.org/deflate - real deflate compression
+// WinHTTP auto-decompresses deflate; reqwest requires its `deflate` feature.
 #[tokio::test]
+#[cfg(any(native_winhttp, feature = "deflate"))]
 async fn httpbin_deflate_decompression() {
     let client = test_client();
 

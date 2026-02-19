@@ -1,4 +1,4 @@
-//! Integration tests for wrest -- exercises the real WinHTTP stack against a
+//! Integration tests for wrest -- exercises the HTTP stack against a
 //! local wiremock `MockServer`.
 
 #![expect(clippy::tests_outside_test_module)]
@@ -1516,6 +1516,9 @@ async fn http1_only_mode() {
 /// exercises the `WinHttpSession::open` path that sets `WINHTTP_OPTION_MAX_CONNS_PER_SERVER`.
 /// Unit-level coverage: `client::tests::builder_field_storage_table` (builder storage only).
 #[tokio::test]
+// `max_connections_per_host()` is a wrest-only API (maps to a WinHTTP
+// session option); reqwest's `ClientBuilder` does not expose it.
+#[cfg(native_winhttp)]
 async fn max_connections_per_host_config() {
     let server = MockServer::start().await;
 
@@ -1743,7 +1746,7 @@ async fn proxy_variants() {
         ),
     ];
 
-    // Config-only: proxy that points nowhere — just verify build succeeds.
+    // Config-only: proxy that points nowhere -- just verify build succeeds.
     Client::builder()
         .timeout(Duration::from_secs(10))
         .proxy(wrest::Proxy::http("http://localhost:9999").unwrap())
@@ -1800,7 +1803,7 @@ async fn response_extensions() {
 }
 
 // NOTE: Body-read timeout behaviour shares the same WinHTTP timeout path
-// as the `timeout` integration test above — both hit ERROR_WINHTTP_TIMEOUT.
+// as the `timeout` integration test above -- both hit ERROR_WINHTTP_TIMEOUT.
 
 // -----------------------------------------------------------------------
 // Redirect edge cases
@@ -1861,7 +1864,7 @@ async fn redirect_method_handling() {
 // -----------------------------------------------------------------------
 
 /// `redirect_policy_none`: builder with `Policy::none()` disables
-/// automatic redirects — the 302 is returned as-is.
+/// automatic redirects -- the 302 is returned as-is.
 /// Covers the `PolicyInner::None` branch in `WinHttpSession::open`.
 #[tokio::test]
 async fn redirect_policy_none() {
@@ -1877,7 +1880,7 @@ async fn redirect_policy_none() {
         .mount(&server)
         .await;
 
-    // NOT mounting the /dest-none handler — redirect should NOT be followed.
+    // NOT mounting the /dest-none handler -- redirect should NOT be followed.
 
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
@@ -1964,7 +1967,7 @@ async fn user_agent_sent_to_server() {
 /// POST a body that exceeds `u32::MAX` bytes, forcing the real
 /// production large-body / multi-write path through the public
 /// `Client` API.  This allocates ~4.01 GiB of RAM and transfers
-/// that much data over loopback — expect it to take a few seconds.
+/// that much data over loopback -- expect it to take a few seconds.
 ///
 /// The unit test `winhttp::tests::large_body_multi_write_path`
 /// exercises the same code path with a 5 MiB body via lowered
@@ -1981,7 +1984,7 @@ async fn large_body_over_4gib() {
         .mount(&server)
         .await;
 
-    // 4 GiB + 1 MiB — just over the DWORD limit.
+    // 4 GiB + 1 MiB -- just over the DWORD limit.
     let size: usize = (u32::MAX as usize) + 1024 * 1024;
     let huge_body = vec![b'Z'; size];
 

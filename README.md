@@ -35,10 +35,28 @@ of OS primitives.
 | **Async runtime** | Requires [`tokio`](https://docs.rs/tokio) | Executor-agnostic -- any runtime or `block_on` |
 | **Binary size** | hyper, h2, ... | Thin FFI layer over a system DLL |
 
-If your application only targets Windows and you want the platform's native
+If your application targets Windows and you want the platform's native
 networking -- the same stack used by Windows itself -- `wrest` lets you do
 that without giving up the ergonomic `reqwest` API your code already uses.
-You can also switch between the two in cross-platform codebases.
+
+### Cross-platform & A/B testing
+
+On **non-Windows** platforms (Linux, macOS, etc.) wrest automatically
+delegates to [`reqwest`](https://docs.rs/reqwest) as its HTTP backend.
+The public API stays the same, so the same code compiles everywhere.
+
+To force the reqwest backend **on Windows** -- for example, to A/B test
+against the native WinHTTP backend -- enable the `always-reqwest`
+feature:
+
+```toml
+wrest = { version = "0.5", features = ["always-reqwest"] }
+```
+
+Feature flags like `json`, `gzip`, `stream`, etc. forward to the
+corresponding reqwest features automatically.  Use
+`default-features = false` to strip wrest and reqwest to their bare
+minimum, then re-add only what you need.
 
 ## Quick start
 
@@ -65,12 +83,25 @@ println!("{body}");
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `noop-compat` | No | Enables ~31 no-op reqwest stubs (connection pool, TCP options, compression toggles, HTTP/1 & HTTP/2 tuning, TLS backend selection, DNS resolver selection, etc.) so reqwest-targeting code compiles without changes |
+| `charset` | **Yes** | Improved text decoding. Native backend has all 39 WHATWG encodings built-in; forwards to `reqwest/charset` on the reqwest backend |
+| `http2` | **Yes** | HTTP/2 support. WinHTTP negotiates via ALPN automatically; forwards to `reqwest/http2` |
+| `default-tls` | **Yes** | TLS via the OS stack (SChannel). Always-on natively; forwards to `reqwest/default-tls` |
+| `native-tls` | No | Explicit OS-native TLS selection. No-op natively (SChannel is always used); forwards to `reqwest/native-tls` |
+| `system-proxy` | **Yes** | Automatic system proxy detection. WinHTTP uses WPAD/PAC natively; forwards to `reqwest/system-proxy` |
 | `json` | No | `RequestBuilder::json()` and `Response::json()` (adds `serde`, `serde_json`) |
 | `form` | No | `RequestBuilder::form()` (adds `serde`, `form_urlencoded`) |
 | `query` | No | `RequestBuilder::query()` (adds `serde`, `form_urlencoded`) |
-| `tracing` | No | Emit diagnostics via the [`tracing`](https://docs.rs/tracing) crate — request lifecycle, proxy resolution, charset decoding, and more |
-| `panicking-compat` | No | `Client::new()` and `impl Default for Client` (these panic on failure -- prefer `Client::builder().build()`) |
+| `gzip` | No | `ClientBuilder::gzip()` no-op toggle (WinHTTP always decompresses gzip); forwards to `reqwest/gzip` |
+| `deflate` | No | `ClientBuilder::deflate()` no-op toggle; forwards to `reqwest/deflate` |
+| `brotli` | No | `ClientBuilder::brotli()` no-op toggle; forwards to `reqwest/brotli` |
+| `zstd` | No | `ClientBuilder::zstd()` no-op toggle; forwards to `reqwest/zstd` |
+| `stream` | No | `Stream`-based body support. Always available natively; forwards to `reqwest/stream` |
+| **`tracing`** | No | Emit diagnostics via the [`tracing`](https://docs.rs/tracing) crate -- request lifecycle, proxy resolution, charset decoding, and more |
+| **`noop-compat`** | No | Enables ~31 no-op reqwest stubs (connection pool, TCP options, HTTP/2 tuning, TLS backend selection, etc.) so reqwest-targeting code compiles without changes. Compression toggles require both this and the respective feature |
+| **`panicking-compat`** | No | `Client::new()` and `impl Default for Client` (these panic on failure -- prefer `Client::builder().build()`) |
+| **`always-reqwest`** | No | Forces the [`reqwest`](https://docs.rs/reqwest) backend even on Windows -- see [Cross-platform & A/B testing](#cross-platform--ab-testing) |
+
+**Bold** feature names are unique to wrest (not present in reqwest).
 
 ## Executor-agnostic
 
@@ -116,9 +147,6 @@ The core `reqwest` workflow is fully supported:
   `connection_verbose()` (requires `tracing`)
 
 ## What doesn't
-
-wrest is **Windows only**. It will not compile on Linux, macOS, or other
-platforms.
 
 The table below compares wrest against reqwest (all features enabled).
 Because WinHTTP is the HTTP stack, some reqwest APIs cannot be meaningfully
@@ -167,8 +195,8 @@ If you find undocumented deviations, please file an issue!
 - **Charset decoding:** `text()` supports all 39 WHATWG-mandated
   encodings.  35 are decoded natively (Win32 `MultiByteToWideChar` or
   pure Rust for UTF-8/UTF-16/x-user-defined).  Three rare encodings
-  — ISO-8859-10 (Latin-6 / Nordic), ISO-8859-14 (Latin-8 / Celtic),
-  and EUC-JP (Extended Unix Code for Japanese) — are absent from the
+  -- ISO-8859-10 (Latin-6 / Nordic), ISO-8859-14 (Latin-8 / Celtic),
+  and EUC-JP (Extended Unix Code for Japanese) -- are absent from the
   Win32 NLS subsystem and are decoded via the system-bundled `icu.dll`
   on Windows 10 1903+; on older builds they will return a decode error.
   ISO-8859-16 (Latin-10 / South-Eastern European) is decoded via a

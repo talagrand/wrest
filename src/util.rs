@@ -115,7 +115,7 @@ pub(crate) fn lock_or_clear<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexG
 /// HTTP header values are opaque octets (RFC 9110 §5.5), but
 /// `RequestBuilder` stores them as `(String, String)` pairs so they can
 /// be cloned, compared, and logged without carrying raw byte buffers.
-/// Latin-1 is the natural encoding for this because every byte 0x00–0xFF
+/// Latin-1 is the natural encoding for this because every byte 0x00-0xFF
 /// maps one-to-one to a Unicode code point, making the round-trip through
 /// [`narrow_latin1`] perfectly lossless.
 pub(crate) fn widen_latin1(bytes: &[u8]) -> String {

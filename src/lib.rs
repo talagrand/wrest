@@ -1,53 +1,67 @@
 #![doc = include_str!("../README.md")]
 #![doc(html_logo_url = "https://raw.githubusercontent.com/talagrand/wrest/main/docs/wrest.png")]
-#![cfg(windows)]
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
-#![allow(private_interfaces)]
+// The native backend exposes `pub` types that impl non-pub traits (e.g.
+// `proxy::ProxyAction`).  This lint does not apply when reqwest provides
+// the public surface.
+#![cfg_attr(native_winhttp, allow(private_interfaces))]
 
-// Tracing shims -- must be first so the macros are visible to all modules.
+// ============================================================
+// Native WinHTTP backend (Windows, unless `always-reqwest`)
+//
+// These modules contain the WinHTTP FFI implementation.  On non-Windows
+// platforms (or when `always-reqwest` is enabled) none of this code is
+// compiled -- reqwest provides every public type instead.
+// ============================================================
+
+#[cfg(native_winhttp)]
 #[macro_use]
 mod tracing;
 
+#[cfg(native_winhttp)]
 pub(crate) mod abi;
+#[cfg(native_winhttp)]
 mod body;
+#[cfg(native_winhttp)]
 pub(crate) mod callback;
+#[cfg(native_winhttp)]
 mod client;
+#[cfg(native_winhttp)]
 mod encoding;
+#[cfg(native_winhttp)]
 mod error;
 /// Proxy configuration types.
+#[cfg(native_winhttp)]
 pub mod proxy;
 /// Redirect policy configuration.
+#[cfg(native_winhttp)]
 pub mod redirect;
+#[cfg(native_winhttp)]
 mod request;
+#[cfg(native_winhttp)]
 mod response;
+#[cfg(native_winhttp)]
 pub(crate) mod url;
+#[cfg(native_winhttp)]
 pub(crate) mod util;
+#[cfg(native_winhttp)]
 pub(crate) mod winhttp;
 
-// -- Public re-exports --
-
+#[cfg(native_winhttp)]
 pub use body::Body;
+#[cfg(native_winhttp)]
 pub use client::{Client, ClientBuilder};
+#[cfg(native_winhttp)]
 pub use error::Error;
+#[cfg(native_winhttp)]
 pub use proxy::{NoProxy, Proxy};
+#[cfg(native_winhttp)]
 pub use request::{Request, RequestBuilder};
+#[cfg(native_winhttp)]
 pub use response::Response;
+#[cfg(native_winhttp)]
 pub use url::{IntoUrl, Url};
-
-// Re-export ecosystem standard types.
-pub use bytes::Bytes;
-pub use futures_core::Stream;
-pub use http::Method;
-pub use http::StatusCode;
-pub use http::Version;
-pub use http::header::HeaderMap;
-
-/// Re-export the `http::header` module for header name constants.
-pub use http::header;
-
-/// A `Result` alias where the `Err` case is [`Error`].
-pub type Result<T> = std::result::Result<T, Error>;
 
 /// Shortcut method to quickly make a `GET` request.
 ///
@@ -60,9 +74,46 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Returns an error if the client cannot be built or the request fails.
 ///
 /// See also [`Client::get`].
+#[cfg(native_winhttp)]
 pub async fn get<U: IntoUrl>(url: U) -> crate::Result<Response> {
     Client::builder().build()?.get(url).send().await
 }
+
+// ============================================================
+// reqwest backend (non-Windows, or `always-reqwest` on Windows)
+//
+// When the native backend is inactive, every public type is a
+// straight re-export from reqwest.  No wrapper types, no shims.
+// ============================================================
+
+#[cfg(not(native_winhttp))]
+pub use reqwest::{
+    Body, Client, ClientBuilder, Error, IntoUrl, NoProxy, Proxy, Request, RequestBuilder, Response,
+    Url, get, redirect,
+};
+
+/// Proxy configuration types.
+#[cfg(not(native_winhttp))]
+pub mod proxy {
+    pub use reqwest::{NoProxy, Proxy};
+}
+
+// ============================================================
+// Common re-exports (identical types regardless of backend)
+// ============================================================
+
+pub use http::Method;
+pub use http::StatusCode;
+pub use http::Version;
+/// Re-export the `http::header` module for header name constants.
+pub use http::header;
+pub use http::header::HeaderMap;
+
+pub use bytes::Bytes;
+pub use futures_core::Stream;
+
+/// A `Result` alias where the `Err` case is [`Error`].
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
 mod tests {
@@ -144,7 +195,7 @@ mod tests {
         assert_future(get("https://example.com/test"));
     }
 
-    /// Consolidated smoke test for Debug / Display impls across all types.
+    /// Consolidated smoke test for Debug / Display impls across all public types.
     ///
     /// Each type that implements `Debug` or `Display` gets a format!() call
     /// here so new impls can't regress to uncovered.  Detailed format-pinning
@@ -152,8 +203,6 @@ mod tests {
     /// the types they test; this test only ensures the code *executes*.
     #[test]
     fn fmt_traits_smoke() {
-        use crate::callback::SignalCancelled;
-
         // -- Client (Debug) --
         let client = Client::builder().build().unwrap();
         let s = format!("{client:?}");
@@ -165,36 +214,22 @@ mod tests {
         assert!(s.contains("Request"), "Request debug: {s}");
         assert!(s.contains("GET"), "Request debug should show method: {s}");
 
-        // -- RequestBuilder (Debug) — valid URL --
+        // -- RequestBuilder (Debug) -- valid URL --
         let rb = client.post("https://example.com/rb");
         let s = format!("{rb:?}");
         assert!(s.contains("RequestBuilder"), "RequestBuilder debug: {s}");
 
-        // -- SignalCancelled (Display + Debug) --
-        let sc = SignalCancelled;
-        let s = format!("{sc}");
-        assert!(s.contains("cancelled"), "SignalCancelled display: {s}");
-        let s = format!("{sc:?}");
-        assert!(s.contains("SignalCancelled"), "SignalCancelled debug: {s}");
-
         // -- Body (Debug, bytes variant) --
         let body = Body::from("hello");
         let s = format!("{body:?}");
-        assert!(s.contains("Body"), "Body debug: {s}");
+        assert!(s.starts_with("Body"), "Body debug: {s}");
 
         // -- Body (Debug, stream variant) --
         let stream =
             futures_util::stream::iter(vec![Ok::<_, std::io::Error>(bytes::Bytes::from("x"))]);
         let body = Body::wrap_stream(stream);
         let s = format!("{body:?}");
-        assert!(s.contains("stream"), "Body stream debug: {s}");
-
-        // -- Error (Display + Debug) --
-        let err = Error::builder("test");
-        let s = format!("{err}");
-        assert!(!s.is_empty(), "Error display: {s}");
-        let s = format!("{err:?}");
-        assert!(s.contains("Builder"), "Error debug: {s}");
+        assert!(s.starts_with("Body"), "Body stream debug: {s}");
 
         // -- Url (Display + Debug) --
         let url: Url = "https://example.com".parse().unwrap();
@@ -216,5 +251,30 @@ mod tests {
         // -- StatusCode (Display) --
         let s = format!("{}", StatusCode::OK);
         assert!(s.contains("200"), "StatusCode display: {s}");
+    }
+
+    /// Smoke test for Debug / Display on native-only internal types
+    /// (`SignalCancelled`, `Error::builder()`) that don't exist when
+    /// the reqwest backend is active.
+    #[test]
+    #[cfg(native_winhttp)]
+    fn fmt_traits_smoke_native_only() {
+        use crate::callback::SignalCancelled;
+
+        // -- SignalCancelled (Display + Debug) --
+        let sc = SignalCancelled;
+        let s = format!("{sc}");
+        assert!(s.contains("cancelled"), "SignalCancelled display: {s}");
+        let s = format!("{sc:?}");
+        assert!(s.contains("SignalCancelled"), "SignalCancelled debug: {s}");
+
+        // -- Error (Display + Debug) --
+        // Error::builder() is a wrest-internal constructor, not available
+        // on the reqwest backend where Error = reqwest::Error.
+        let err = Error::builder("test");
+        let s = format!("{err}");
+        assert!(!s.is_empty(), "Error display: {s}");
+        let s = format!("{err:?}");
+        assert!(s.contains("Builder"), "Error debug: {s}");
     }
 }

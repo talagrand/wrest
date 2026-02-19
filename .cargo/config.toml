@@ -1,0 +1,23 @@
+# Aliases for wrest developers.  These are never published to crates.io.
+#
+# `cargo xt`  -- test with all user-facing features (native WinHTTP backend)
+# `cargo xc`  -- clippy with all user-facing features
+# `cargo xtr` -- test with the reqwest backend (always-reqwest)
+# `cargo xcr` -- clippy with the reqwest backend
+# `cargo xcov` -- line-coverage with all native features (requires cargo-llvm-cov)
+#
+# Prefer these over `--all-features`, which silently activates
+# `always-reqwest` and switches to the reqwest backend.
+#
+# Keep in sync with NATIVE_FEATURES in .github/workflows/ci.yml.
+
+# All features minus always-reqwest.
+[env]
+NATIVE_FEATURES = "charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream"
+
+[alias]
+xt   = "test   --all-targets --features charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream"
+xc   = "clippy --all-targets --features charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream -- -D warnings"
+xtr  = "test   --all-targets --features charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream,always-reqwest"
+xcr  = "clippy --all-targets --features charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream,always-reqwest -- -D warnings"
+xcov = "llvm-cov             --features charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream"

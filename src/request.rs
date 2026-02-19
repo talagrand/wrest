@@ -978,7 +978,7 @@ mod tests {
         let cases: Vec<(&str, Option<crate::Body>, bool)> = vec![
             ("no body", None, true),
             ("bytes body", Some(crate::Body::from("payload")), true),
-            // Stream body cannot be cloned — try_clone returns None.
+            // Stream body cannot be cloned -- try_clone returns None.
         ];
 
         for (label, body, _) in cases {
@@ -998,7 +998,7 @@ mod tests {
             );
         }
 
-        // Stream body — cannot clone
+        // Stream body -- cannot clone
         let stream = futures_util::stream::once(async {
             Ok::<_, crate::Error>(bytes::Bytes::from_static(b"data"))
         });
