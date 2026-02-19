@@ -235,8 +235,8 @@ mod tests {
     fn body_debug_bytes() {
         let body = Body::from("hi");
         let s = format!("{body:?}");
-        assert!(s.contains("bytes"));
-        assert!(s.contains("2")); // length
+        assert!(s.contains("bytes"), "should mention bytes: {s}");
+        assert!(s.contains("2"), "should show length: {s}");
     }
 
     #[test]
@@ -245,7 +245,7 @@ mod tests {
             futures_util::stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from("chunk"))]);
         let body = Body::wrap_stream(stream);
         let s = format!("{body:?}");
-        assert!(s.contains("stream"));
+        assert!(s.contains("stream"), "should mention stream: {s}");
     }
 
     #[test]

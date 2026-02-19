@@ -689,7 +689,9 @@ pub(crate) async fn execute_request(
         use futures_util::StreamExt;
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| {
-                Error::body(format!("stream body error: {e}")).with_url(url.clone())
+                // Classified as Request (not Body) to match reqwest: this is a
+                // send-phase failure, not a response-body-read failure.
+                Error::request(format!("stream body error: {e}")).with_url(url.clone())
             })?;
 
             if chunk.is_empty() {

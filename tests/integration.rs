@@ -695,7 +695,10 @@ async fn streaming_body_error_propagated() {
         .await;
 
     let err = result.expect_err("stream error should propagate");
-    assert!(err.is_body(), "expected a body error, got: {err:?}");
+    assert!(
+        err.is_request(),
+        "expected a request error (body stream failed during send), got: {err:?}"
+    );
     assert!(
         format!("{err}").contains("boom"),
         "error message should contain the stream error text, got: {err}"
