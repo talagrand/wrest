@@ -37,7 +37,7 @@ use crate::Error;
 ///
 /// # Variant names
 ///
-/// The variant names mirror [`url::ParseError`] so that code which
+/// The variant names mirror [`url::ParseError`](https://docs.rs/url/latest/url/enum.ParseError.html) so that code which
 /// pattern-matches on specific variants can compile against both crates
 /// without changes.  Because parsing is backed by WinHTTP's
 /// `WinHttpCrackUrl`, only a subset of variants are actually produced at
@@ -117,21 +117,15 @@ impl std::fmt::Display for ParseError {
             ParseError::InvalidPort => f.write_str("invalid port number"),
             ParseError::InvalidIpv4Address => f.write_str("invalid IPv4 address"),
             ParseError::InvalidIpv6Address => f.write_str("invalid IPv6 address"),
-            ParseError::InvalidDomainCharacter => {
-                f.write_str("invalid domain character")
-            }
-            ParseError::RelativeUrlWithoutBase => {
-                f.write_str("relative URL without a base")
-            }
+            ParseError::InvalidDomainCharacter => f.write_str("invalid domain character"),
+            ParseError::RelativeUrlWithoutBase => f.write_str("relative URL without a base"),
             ParseError::RelativeUrlWithCannotBeABaseBase => {
                 f.write_str("relative URL with a cannot-be-a-base base")
             }
             ParseError::SetHostOnCannotBeABaseUrl => {
                 f.write_str("a cannot-be-a-base URL doesn't have a host to set")
             }
-            ParseError::Overflow => {
-                f.write_str("URLs more than 4 GB are not supported")
-            }
+            ParseError::Overflow => f.write_str("URLs more than 4 GB are not supported"),
             ParseError::InvalidUrl => f.write_str("invalid URL"),
             ParseError::UnsupportedScheme => f.write_str("unsupported URL scheme"),
         }
@@ -324,10 +318,7 @@ impl Url {
         // Query-only: ?query (possibly with fragment)
         if input_path.is_empty() && input_query.is_some() {
             // Preserve base path, replace query (and fragment).
-            let mut base_str = format!(
-                "{}://{}",
-                self.scheme, self.host,
-            );
+            let mut base_str = format!("{}://{}", self.scheme, self.host,);
             if self.explicit_port {
                 base_str.push_str(&format!(":{}", self.port));
             }
@@ -495,10 +486,7 @@ pub trait IntoUrlSealed {
 /// Implemented for `&str`, `String`, and [`Url`].  Invalid URLs produce an
 /// [`Error`] at request-build time -- not inside `send()`.
 ///
-/// This trait is sealed -- it cannot be implemented outside of `wrest`,
-/// matching `reqwest::IntoUrl`.  The `into_url()` method lives on the
-/// non-exported supertrait [`IntoUrlSealed`], so external callers cannot
-/// invoke it.
+/// This trait is sealed and cannot be implemented outside of `wrest`.
 pub trait IntoUrl: IntoUrlSealed {}
 
 impl IntoUrlSealed for &str {
@@ -693,7 +681,9 @@ fn extract_userinfo(url: &str) -> (std::borrow::Cow<'_, str>, String, Option<Str
     // Reconstruct the URL without userinfo: skip past "userinfo@".
     // We already found '@' in `authority_part` above, so `split_once('@')`
     // on the full `authority_and_rest` always succeeds.
-    let after_at = authority_and_rest.split_once('@').map_or(authority_and_rest, |(_, rest)| rest);
+    let after_at = authority_and_rest
+        .split_once('@')
+        .map_or(authority_and_rest, |(_, rest)| rest);
     let cleaned = format!("{scheme_colon_slashes}://{after_at}");
 
     (std::borrow::Cow::Owned(cleaned), username, password)
@@ -769,7 +759,9 @@ fn remove_dot_segments(path: &str) -> String {
 /// Split a URI reference into `(path, query, fragment)` components
 /// per RFC 3986 §3 syntax:
 ///
-///     URI-reference = [ path ] [ "?" query ] [ "#" fragment ]
+/// ```text
+/// URI-reference = [ path ] [ "?" query ] [ "#" fragment ]
+/// ```
 ///
 /// Supports the forms used by `Url::join`:
 /// - `""` → `("", None, None)`
@@ -1111,30 +1103,10 @@ mod tests {
             "relative path (sibling)",
         ),
         // -- Dot segments --
-        (
-            "https://example.com/a/b/c",
-            "./d",
-            "https://example.com/a/b/d",
-            "dot-segment ./",
-        ),
-        (
-            "https://example.com/a/b/c",
-            "../d",
-            "https://example.com/a/d",
-            "dot-segment ../",
-        ),
-        (
-            "https://example.com/a/b/c/d",
-            "../../e",
-            "https://example.com/a/e",
-            "dot-segment ../../",
-        ),
-        (
-            "https://example.com/a",
-            "../../b",
-            "https://example.com/b",
-            "dot-segment past root",
-        ),
+        ("https://example.com/a/b/c", "./d", "https://example.com/a/b/d", "dot-segment ./"),
+        ("https://example.com/a/b/c", "../d", "https://example.com/a/d", "dot-segment ../"),
+        ("https://example.com/a/b/c/d", "../../e", "https://example.com/a/e", "dot-segment ../../"),
+        ("https://example.com/a", "../../b", "https://example.com/b", "dot-segment past root"),
         (
             "https://example.com/old/path",
             "/a/b/../c",
@@ -1142,18 +1114,8 @@ mod tests {
             "dot-segment in absolute path",
         ),
         // -- Trailing dot/dotdot --
-        (
-            "https://example.com/a/b/c",
-            ".",
-            "https://example.com/a/b/",
-            "trailing dot",
-        ),
-        (
-            "https://example.com/a/b/c",
-            "..",
-            "https://example.com/a/",
-            "trailing dotdot",
-        ),
+        ("https://example.com/a/b/c", ".", "https://example.com/a/b/", "trailing dot"),
+        ("https://example.com/a/b/c", "..", "https://example.com/a/", "trailing dotdot"),
         // -- Empty input → returns base URL --
         (
             "https://example.com/a/b?q=1#f",
@@ -1216,11 +1178,7 @@ mod tests {
             let joined = base
                 .join(reference)
                 .unwrap_or_else(|e| panic!("{label}: join({base_str:?}, {reference:?}): {e}"));
-            assert_eq!(
-                joined.as_str(),
-                expected,
-                "{label}: join({base_str:?}, {reference:?})",
-            );
+            assert_eq!(joined.as_str(), expected, "{label}: join({base_str:?}, {reference:?})",);
         }
     }
 
@@ -1381,12 +1339,7 @@ mod tests {
             "unsupported URL scheme",
             "unsupported scheme",
         ),
-        (
-            "not a url",
-            ParseError::InvalidUrl,
-            "invalid URL",
-            "invalid url (catch-all)",
-        ),
+        ("not a url", ParseError::InvalidUrl, "invalid URL", "invalid url (catch-all)"),
     ];
 
     #[test]
@@ -1418,10 +1371,7 @@ mod tests {
             );
             use std::error::Error as _;
             let source = crate_err.source().expect("should have source");
-            assert!(
-                source.to_string().contains(display),
-                "{label}: source contains Display text",
-            );
+            assert!(source.to_string().contains(display), "{label}: source contains Display text",);
         }
     }
 

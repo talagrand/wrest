@@ -9,8 +9,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   MSRV: '1.90'
-  # Every user-facing feature except always-reqwest.
-  NATIVE_FEATURES: charset,http2,default-tls,native-tls,system-proxy,json,form,query,tracing,panicking-compat,noop-compat,gzip,deflate,brotli,zstd,stream
 
 jobs:
   test:
@@ -50,8 +48,8 @@ jobs:
         case "${{ matrix.mode }}" in
           no-defaults)  echo "flags=--no-default-features" ;;
           defaults)     echo "flags=" ;;
-          all)          echo "flags=--features $NATIVE_FEATURES" ;;
-          all-reqwest)  echo "flags=--features $NATIVE_FEATURES,always-reqwest" ;;
+          all)          echo "flags=--features __all-native-features" ;;
+          all-reqwest)  echo "flags=--features __all-native-features,always-reqwest" ;;
         esac >> "$GITHUB_OUTPUT"
 
     - name: Install Rust
@@ -75,7 +73,7 @@ jobs:
 
     - name: Run doc tests
       if: matrix.doc-tests
-      run: cargo test --doc --features ${{ env.NATIVE_FEATURES }}
+      run: cargo test --doc --features __all-native-features
 
   fmt:
     name: Formatting
@@ -108,7 +106,7 @@ jobs:
       uses: Swatinem/rust-cache@v2
 
     - name: Build documentation
-      run: cargo doc --all-features --no-deps
+      run: cargo doc --features __all-native-features --no-deps
 
   coverage:
     name: Coverage
@@ -130,7 +128,7 @@ jobs:
       uses: Swatinem/rust-cache@v2
 
     - name: Generate coverage
-      run: cargo llvm-cov --features ${{ env.NATIVE_FEATURES }} --lcov --output-path lcov.info
+      run: cargo llvm-cov --features __all-native-features --lcov --output-path lcov.info
 
     - name: Upload to Codecov
       uses: codecov/codecov-action@v5
@@ -157,8 +155,14 @@ jobs:
       run: cargo audit
 
   minimal-versions:
-    name: Minimal Versions
-    runs-on: windows-latest
+    name: Minimal Versions (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: native,  os: windows-latest }
+          - { name: reqwest, os: ubuntu-latest }
 
     steps:
     - name: Checkout code
@@ -176,4 +180,5 @@ jobs:
         tool: cargo-hack,cargo-minimal-versions
 
     - name: Check minimal versions
-      run: cargo +nightly minimal-versions check --direct --all-features
+      shell: bash
+      run: cargo +nightly minimal-versions check --direct --features __all-native-features

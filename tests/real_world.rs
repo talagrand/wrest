@@ -27,7 +27,15 @@
 #![expect(clippy::tests_outside_test_module)]
 
 use std::time::Duration;
-use wrest::{Client, StatusCode};
+use wrest::Client;
+#[cfg(any(
+    native_winhttp,
+    feature = "default-tls",
+    feature = "native-tls",
+    feature = "gzip",
+    feature = "deflate"
+))]
+use wrest::StatusCode;
 
 /// Helper: build a client with sensible defaults for real-world tests
 fn test_client() -> Client {
@@ -44,6 +52,7 @@ fn test_client() -> Client {
 /// Test against example.com (IANA reserved domain for testing)
 /// Validates real DNS resolution, TLS handshake, and HTTP/1.1 or HTTP/2
 #[tokio::test]
+#[cfg(any(native_winhttp, feature = "default-tls", feature = "native-tls"))]
 async fn example_com() {
     let client = test_client();
 
@@ -61,6 +70,7 @@ async fn example_com() {
 
 /// Test httpbin.org/get - service designed for HTTP testing
 #[tokio::test]
+#[cfg(any(native_winhttp, feature = "default-tls", feature = "native-tls"))]
 async fn httpbin_get() {
     let client = test_client();
 
@@ -79,6 +89,7 @@ async fn httpbin_get() {
 
 /// Test httpbin.org/stream-bytes - real chunked encoding
 #[tokio::test]
+#[cfg(any(native_winhttp, feature = "default-tls", feature = "native-tls"))]
 async fn httpbin_chunked_encoding() {
     let client = test_client();
 
@@ -97,6 +108,7 @@ async fn httpbin_chunked_encoding() {
 
 /// Test httpbin.org/redirect - real HTTP redirects
 #[tokio::test]
+#[cfg(any(native_winhttp, feature = "default-tls", feature = "native-tls"))]
 async fn httpbin_redirect_chain() {
     let client = test_client();
 
@@ -197,6 +209,7 @@ async fn badssl_invalid_certs_rejected() {
 }
 
 /// Test danger_accept_invalid_certs allows self-signed certificates
+#[cfg(any(native_winhttp, feature = "default-tls", feature = "native-tls"))]
 #[tokio::test]
 async fn badssl_with_accept_invalid_certs() {
     // With danger_accept_invalid_certs, we should succeed

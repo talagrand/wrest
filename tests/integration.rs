@@ -28,7 +28,9 @@ impl tracing::Subscriber for SinkSubscriber {
     fn enter(&self, _: &tracing::span::Id) {}
     fn exit(&self, _: &tracing::span::Id) {}
 }
-use wiremock::matchers::{body_bytes, body_string, header, method, path};
+#[cfg(any(native_winhttp, feature = "stream"))]
+use wiremock::matchers::body_bytes;
+use wiremock::matchers::{body_string, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use wrest::{Client, HeaderMap, StatusCode, Version};
 
@@ -610,6 +612,7 @@ async fn empty_bytes_body() {
 ///
 /// Each case sends a POST with `Body::wrap_stream()` and verifies the server
 /// receives the expected concatenated payload.
+#[cfg(any(native_winhttp, feature = "stream"))]
 #[tokio::test]
 async fn streaming_body_variants() {
     // (label, path, chunks, expected_body)
@@ -678,6 +681,7 @@ async fn streaming_body_variants() {
 
 /// `streaming_body_error_propagated`: an I/O error yielded by the
 /// stream is surfaced as a `wrest::Error` (not a panic or hang).
+#[cfg(any(native_winhttp, feature = "stream"))]
 #[tokio::test]
 async fn streaming_body_error_propagated() {
     let server = MockServer::start().await;
@@ -711,6 +715,7 @@ async fn streaming_body_error_propagated() {
 /// `streaming_body_delayed_chunks`: a stream that yields chunks with
 /// small delays between them.  Exercises the chunked-transfer path with
 /// realistic async timing rather than a pre-buffered iterator.
+#[cfg(any(native_winhttp, feature = "stream"))]
 #[tokio::test]
 async fn streaming_body_delayed_chunks() {
     let server = MockServer::start().await;
@@ -746,6 +751,7 @@ async fn streaming_body_delayed_chunks() {
 /// `concurrent_requests_streaming`: 5 parallel POSTs with streaming bodies;
 /// verifies that multiple simultaneous chunked uploads don't interfere with
 /// each other.
+#[cfg(any(native_winhttp, feature = "stream"))]
 #[tokio::test]
 async fn concurrent_requests_streaming() {
     let server = MockServer::start().await;
@@ -972,6 +978,7 @@ async fn headers_mut_modify() {
 }
 
 /// `text_with_charset_utf8`: UTF-8 body passes through text_with_charset.
+#[cfg(any(native_winhttp, feature = "charset"))]
 #[tokio::test]
 async fn text_with_charset_utf8() {
     let server = mock_get("/charset", 200, "hello UTF-8").await;
@@ -1229,6 +1236,7 @@ async fn get_free_function() {
 }
 
 /// `bytes_stream_collect`: consume response via bytes_stream().
+#[cfg(any(native_winhttp, feature = "stream"))]
 #[tokio::test]
 async fn bytes_stream_collect() {
     use futures_util::StreamExt;
@@ -1364,6 +1372,7 @@ async fn content_length_absent() {
 /// `text_with_latin1_charset`: mock server sends Latin-1 encoded bytes with
 /// `Content-Type: text/html; charset=iso-8859-1`. Verify `text()` decodes
 /// the non-ASCII bytes correctly.
+#[cfg(any(native_winhttp, feature = "charset"))]
 #[tokio::test]
 async fn text_with_latin1_charset() {
     let server = MockServer::start().await;
@@ -1673,6 +1682,7 @@ async fn connection_verbose_tracing() {
 }
 
 /// `large_streaming_body_upload`: POST with large streaming body (chunked encoding).
+#[cfg(any(native_winhttp, feature = "stream"))]
 #[tokio::test]
 async fn large_streaming_body_upload() {
     let server = MockServer::start().await;

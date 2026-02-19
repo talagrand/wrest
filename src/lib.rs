@@ -225,11 +225,14 @@ mod tests {
         assert!(s.starts_with("Body"), "Body debug: {s}");
 
         // -- Body (Debug, stream variant) --
-        let stream =
-            futures_util::stream::iter(vec![Ok::<_, std::io::Error>(bytes::Bytes::from("x"))]);
-        let body = Body::wrap_stream(stream);
-        let s = format!("{body:?}");
-        assert!(s.starts_with("Body"), "Body stream debug: {s}");
+        #[cfg(any(native_winhttp, feature = "stream"))]
+        {
+            let stream =
+                futures_util::stream::iter(vec![Ok::<_, std::io::Error>(bytes::Bytes::from("x"))]);
+            let body = Body::wrap_stream(stream);
+            let s = format!("{body:?}");
+            assert!(s.starts_with("Body"), "Body stream debug: {s}");
+        }
 
         // -- Url (Display + Debug) --
         let url: Url = "https://example.com".parse().unwrap();

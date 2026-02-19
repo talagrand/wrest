@@ -19,7 +19,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(native_winhttp)"] }
 [package.metadata.docs.rs]
 default-target = "x86_64-pc-windows-msvc"
 targets = ["x86_64-pc-windows-msvc"]
-all-features = true
+features = ["__all-native-features"]
 
 [lints.clippy]
 unwrap_used = "warn"
@@ -162,6 +162,21 @@ noop-compat      = []
 ## fallible construction.  Provided for reqwest API compatibility.
 panicking-compat = []
 
+# -- Meta ------------------------------------------------------------
+
+## Activates every user-facing feature *except* `always-reqwest`.
+##
+## Convenient for CI, docs.rs, and downstream crates that want
+## full coverage without accidentally disabling the native WinHTTP backend.
+## Double-underscore prefix marks it as an internal implementation detail.
+__all-native-features = [
+    "charset", "http2", "default-tls", "native-tls", "system-proxy",
+    "json", "form", "query", "tracing",
+    "panicking-compat", "noop-compat",
+    "gzip", "deflate", "brotli", "zstd",
+    "stream",
+]
+
 # -- Backend selection ----------------------------------------------
 
 ## Forces the reqwest backend even on Windows.  Useful for A/B testing
@@ -173,12 +188,12 @@ futures-core = "0.3.31"
 futures-channel = "0.3.31"
 futures-util = "0.3.31"
 futures-timer = "3"
-serde = { version = "1", optional = true }
-serde_json = { version = "1", optional = true }
-form_urlencoded = { version = "1", optional = true }
+serde = { version = "1.0.210", optional = true }
+serde_json = { version = "1.0.128", optional = true }
+form_urlencoded = { version = "1.2.2", optional = true }
 base64 = "0.22"
 tracing = { version = "0.1.40", default-features = false, features = ["std"], optional = true }
-http = "1"
+http = "1.1"
 bytes = "1.11.1"
 reqwest = { version = "0.13", optional = true, default-features = false }
 
