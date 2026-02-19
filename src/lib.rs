@@ -61,7 +61,7 @@ pub use request::{Request, RequestBuilder};
 #[cfg(native_winhttp)]
 pub use response::Response;
 #[cfg(native_winhttp)]
-pub use url::{IntoUrl, Url};
+pub use url::{IntoUrl, ParseError, Url};
 
 /// Shortcut method to quickly make a `GET` request.
 ///

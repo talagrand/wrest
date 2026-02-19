@@ -286,6 +286,12 @@ impl std::error::Error for Error {
     }
 }
 
+impl From<crate::url::ParseError> for Error {
+    fn from(e: crate::url::ParseError) -> Self {
+        Error::builder(e.to_string()).with_source(e)
+    }
+}
+
 /// Classify a Win32 / WinHTTP error code into an [`ErrorKind`].
 ///
 /// This is the **single** place in the crate that classifies WinHTTP
@@ -416,23 +422,12 @@ mod tests {
         // error we call every other entry's function pointer and verify
         // only the designated one fires.
         type TestCase<'a> = (Error, &'a str, fn(&Error) -> bool);
-        let cases: &[TestCase] = &[
+        let cases: Vec<TestCase> = vec![
             (Error::builder("b"), "builder", Error::is_builder),
             (Error::request("r"), "request", Error::is_request),
             (Error::timeout("t"), "timeout", Error::is_timeout),
             (Error::body("d"), "body", Error::is_body),
             (Error::decode("d"), "decode", Error::is_decode),
-            (
-                Error {
-                    kind: ErrorKind::Upgrade,
-                    message: "u".into(),
-                    source: None,
-                    status: None,
-                    url: None,
-                },
-                "upgrade",
-                Error::is_upgrade,
-            ),
             (
                 Error {
                     kind: ErrorKind::Connect,
@@ -468,12 +463,29 @@ mod tests {
             ),
         ];
 
-        for (err, label, check) in cases {
+        #[cfg(feature = "noop-compat")]
+        let cases = {
+            let mut v = cases;
+            v.push((
+                Error {
+                    kind: ErrorKind::Upgrade,
+                    message: "u".into(),
+                    source: None,
+                    status: None,
+                    url: None,
+                },
+                "upgrade",
+                Error::is_upgrade as fn(&Error) -> bool,
+            ));
+            v
+        };
+
+        for (err, label, check) in &cases {
             assert!(check(err), "{label}: own is_*() should be true");
 
             // Cross-check: every *other* entry's function pointer must
             // return false for this error.
-            for (_, other_label, other_check) in cases {
+            for (_, other_label, other_check) in &cases {
                 if *other_label != *label {
                     assert!(!other_check(err), "{label}: is_{other_label}() should be false");
                 }

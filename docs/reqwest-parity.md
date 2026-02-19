@@ -23,7 +23,7 @@ Each row is a single public API item. Status meanings:
 | `Response` | ✓ | ✓ | ✅ | |
 | `Body` | ✓ | ✓ | ✅ | |
 | `Error` / `Result` | ✓ | ✓ | ✅ | |
-| `Url` | ✓ | ✓ | ✅ | |
+| `Url` | ✓ | ✓ | ✅ | reqwest re-exports `url::Url`; wrest provides its own `Url` type backed by `WinHttpCrackUrl` — see **Url Methods** section below |
 | `Method` | ✓ | ✓ | ✅ | |
 | `StatusCode` | ✓ | ✓ | ✅ | |
 | `Version` (http) | ✓ | ✓ | ✅ | |
@@ -72,7 +72,7 @@ Each row is a single public API item. Status meanings:
 | Method | reqwest | wrest | Status | Notes |
 |--------|---------|-------|--------|-------|
 | `timeout()` | ✓ | ✓ | ✅ | |
-| `connect_timeout()` | ✓ | ✓ | ✅ | |
+| `connect_timeout()` | ✓ | ✓ | ✅ | Default **60 s** (WinHTTP); reqwest default is **None** |
 | `read_timeout()` | ✓ | ✓ | ✅ | wrest maps to WinHTTP receive timeout |
 | `send_timeout()` | — | ✓ | ✅ | wrest extension (not in reqwest) |
 
@@ -262,7 +262,7 @@ Each row is a single public API item. Status meanings:
 | `body()` | ✓ | ✓ | ✅ | |
 | `timeout()` | ✓ | ✓ | ✅ | |
 | `query()` | ✓ | ✓ | ✅ | behind `query` feature |
-| `form()` | ✓ | ✓ | ✅ | behind `form` feature |
+| `form()` | ✓ | ✓ | ✅ | behind `form` feature; uses `serde_json` → `form_urlencoded` bridge (reqwest uses `serde_urlencoded`). Nested objects produce a JSON string in wrest vs error in reqwest. |
 | `json()` | ✓ | ✓ | ✅ | behind `json` feature |
 | `version()` | ✓ | — | 🔇 | no-op under `noop-compat` |
 | `multipart()` | ✓ | — | 💤 | multipart module not implemented |
@@ -284,7 +284,7 @@ Each row is a single public API item. Status meanings:
 | `headers_mut()` | ✓ | ✓ | ✅ | |
 | `extensions()` | ✓ | ✓ | ✅ | |
 | `extensions_mut()` | ✓ | ✓ | ✅ | |
-| `content_length()` | ✓ | ✓ | ✅ | |
+| `content_length()` | ✓ | ✓ | ✅ | Returns **compressed** (wire) size; reqwest returns **decompressed** size via `hyper::Body::size_hint()`. Identical for uncompressed responses. |
 | `text()` | ✓ | ✓ | ✅ | Decodes using `Content-Type` charset; supports all 39 WHATWG encodings (35 natively via `MultiByteToWideChar`, 3 via ICU, 1 via lookup table). Three rare encodings (ISO-8859-10 (Latin-6 / Nordic), ISO-8859-14 (Latin-8 / Celtic), EUC-JP (Extended Unix Code for Japanese)) fall back to ICU via `icu.dll` and require Windows 10 1903+. |
 | `text_with_charset()` | ✓ | ✓ | ✅ | Caller-specified fallback charset; same 39-encoding support as `text()` |
 | `json()` | ✓ | ✓ | ✅ | behind `json` feature |
@@ -306,6 +306,87 @@ Each row is a single public API item. Status meanings:
 | `as_bytes()` | ✓ | ✓ | ✅ | |
 | `wrap_stream()` | ✓ | ✓ | ✅ | |
 | `try_clone()` | ✓ | ✓ | ✅ | |
+| `content_length()` | ✓ | — | 💤 | |
+| `From<Bytes>` | ✓ (zero-copy) | ✓ (zero-copy) | ✅ | |
+| `From<&'static [u8]>` | ✓ (zero-copy) | ✓ (zero-copy) | ✅ | |
+| `From<tokio::fs::File>` | ✓ | — | 💤 | |
+| `From<Response>` | ✓ | — | 💤 | pipe response as body of another request |
+
+---
+
+## `Url` Methods
+
+wrest provides its own `Url` type backed by `WinHttpCrackUrl`, not
+`url::Url`.  The intentional subset is documented here.  Missing methods
+are feasible future work unless noted otherwise.
+
+### Type-level differences
+
+| Item | reqwest (`url::Url`) | wrest (`Url`) | Notes |
+|------|---------------------|---------------|-------|
+| Error type of `parse()` / `FromStr` | `url::ParseError` | `wrest::ParseError` | Variant names mirror `url::ParseError` (`EmptyHost`, `IdnaError`, `InvalidPort`, …, `Overflow`) plus wrest-specific `InvalidUrl` and `UnsupportedScheme`. Display strings match exactly for shared variants. Most url-mirrored variants are never produced by WinHTTP; `InvalidUrl` is the catch-all |
+| Scheme restriction | Any | `http` / `https` only | WinHTTP limitation |
+| IDNA (international domains) | Punycode-encoded | Passed through as-is | No `idna` crate |
+
+### Accessor methods
+
+| Method | reqwest | wrest | Status | Notes |
+|--------|---------|-------|--------|-------|
+| `as_str()` | ✓ | ✓ | ✅ | |
+| `scheme()` | ✓ | ✓ | ✅ | |
+| `host_str()` | ✓ | ✓ | ✅ | |
+| `host()` | ✓ (`Host` enum) | — | 💤 | |
+| `port()` | ✓ | ✓ | ✅ | |
+| `port_or_known_default()` | ✓ | ✓ | ✅ | |
+| `path()` | ✓ | ✓ | ✅ | |
+| `query()` | ✓ | ✓ | ✅ | |
+| `fragment()` | ✓ | ✓ | ✅ | |
+| `username()` | ✓ | ✓ | ✅ | |
+| `password()` | ✓ | ✓ | ✅ | |
+| `domain()` | ✓ | — | 💤 | |
+| `has_host()` | ✓ | — | 💤 | always `true` for HTTP(S) |
+| `has_authority()` | ✓ | — | 💤 | |
+| `cannot_be_a_base()` | ✓ | — | 💤 | always `false` for HTTP(S) |
+| `origin()` | ✓ | — | 💤 | |
+
+### Parsing & navigation
+
+| Method | reqwest | wrest | Status | Notes |
+|--------|---------|-------|--------|-------|
+| `parse()` | ✓ | ✓ | ✅ | Error type is `wrest::ParseError` (mirrors `url::ParseError` variants + `UnsupportedScheme`) |
+| `join()` | ✓ | ✓ | ✅ | |
+| `make_relative()` | ✓ | — | 💤 | |
+| `path_segments()` | ✓ | — | 💤 | |
+| `query_pairs()` | ✓ | — | 💤 | |
+| `socket_addrs()` | ✓ | — | 🔒 | Would require DNS resolution |
+
+### Mutation
+
+| Method | reqwest | wrest | Status | Notes |
+|--------|---------|-------|--------|-------|
+| `set_scheme()` | ✓ | — | 💤 | |
+| `set_host()` | ✓ | — | 💤 | |
+| `set_port()` | ✓ | — | 💤 | |
+| `set_path()` | ✓ | — | 💤 | |
+| `set_query()` | ✓ | — | 💤 | |
+| `set_fragment()` | ✓ | — | 💤 | |
+| `set_username()` | ✓ | — | 💤 | |
+| `set_password()` | ✓ | — | 💤 | |
+| `query_pairs_mut()` | ✓ | — | 💤 | |
+
+### Trait impls
+
+| Trait | reqwest | wrest | Status | Notes |
+|-------|---------|-------|--------|-------|
+| `Display` | ✓ | ✓ | ✅ | |
+| `Debug` | ✓ | ✓ | ✅ | Format mirrors `url::Url`'s derived Debug |
+| `Clone`, `Eq`, `Hash` | ✓ | ✓ | ✅ | |
+| `Ord`, `PartialOrd` | ✓ | ✓ | ✅ | |
+| `FromStr` | ✓ | ✓ | ✅ | Err = `ParseError` |
+| `TryFrom<&str>` / `TryFrom<String>` | ✓ | ✓ | ✅ | Error = `ParseError` |
+| `AsRef<str>` | ✓ | ✓ | ✅ | |
+| `Serialize` / `Deserialize` | ✓ (via `url`) | ✓ (`json` feature) | ✅ | Different feature gate |
+| `From<Url> for String` | ✓ | ✓ | ✅ | |
 
 ---
 

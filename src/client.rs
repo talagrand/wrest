@@ -270,8 +270,11 @@ impl ClientBuilder {
     /// This limits only the TCP connect phase. Maps to WinHTTP's
     /// `nConnectTimeout` parameter in `WinHttpSetTimeouts`.
     ///
-    /// Default: **60 seconds**.  For end-to-end control use
-    /// [`timeout()`](Self::timeout) instead.
+    /// # Deviation from reqwest
+    ///
+    /// Default: **60 seconds** (WinHTTP's built-in default).  reqwest
+    /// defaults to **no connect timeout** (`None`).  For end-to-end
+    /// control use [`timeout()`](Self::timeout) instead.
     #[must_use]
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect_timeout = Some(timeout);

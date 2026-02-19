@@ -26,6 +26,121 @@
 use crate::Error;
 
 // ---------------------------------------------------------------------------
+// ParseError
+// ---------------------------------------------------------------------------
+
+/// An error type for URL parsing failures.
+///
+/// Returned by [`Url::parse`], [`Url::join`],
+/// [`FromStr`](std::str::FromStr), and
+/// [`TryFrom`] implementations on [`Url`].
+///
+/// # Variant names
+///
+/// The variant names mirror [`url::ParseError`] so that code which
+/// pattern-matches on specific variants can compile against both crates
+/// without changes.  Because parsing is backed by WinHTTP's
+/// `WinHttpCrackUrl`, only a subset of variants are actually produced at
+/// runtime:
+///
+/// | Variant                            | Produced by wrest? |
+/// |------------------------------------|--------------------|
+/// | `EmptyHost`                        | No  |
+/// | `IdnaError`                        | No  |
+/// | `InvalidPort`                      | No  |
+/// | `InvalidIpv4Address`               | No  |
+/// | `InvalidIpv6Address`               | No  |
+/// | `InvalidDomainCharacter`           | No  |
+/// | `RelativeUrlWithoutBase`           | No  |
+/// | `RelativeUrlWithCannotBeABaseBase` | No  |
+/// | `SetHostOnCannotBeABaseUrl`        | No  |
+/// | `Overflow`                         | No  |
+/// | `InvalidUrl`                       | Yes (wrest-specific catch-all for WinHTTP parse failures) |
+/// | `UnsupportedScheme`                | Yes (wrest-specific, no `url` equivalent) |
+///
+/// Variants marked "No" exist for pattern-matching compatibility and will
+/// never be returned by wrest's parser.  Code that just propagates with `?`
+/// is unaffected regardless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ParseError {
+    /// The URL has an empty host.
+    EmptyHost,
+
+    /// An internationalized domain name contained invalid characters.
+    IdnaError,
+
+    /// The port number is invalid.
+    InvalidPort,
+
+    /// The IPv4 address is invalid.
+    InvalidIpv4Address,
+
+    /// The IPv6 address is invalid.
+    InvalidIpv6Address,
+
+    /// The domain contains invalid characters.
+    InvalidDomainCharacter,
+
+    /// A relative URL was provided where an absolute URL was expected.
+    RelativeUrlWithoutBase,
+
+    /// A relative URL with a cannot-be-a-base base was provided.
+    RelativeUrlWithCannotBeABaseBase,
+
+    /// Cannot set host on a cannot-be-a-base URL.
+    SetHostOnCannotBeABaseUrl,
+
+    /// The URL is too large to be parsed.
+    Overflow,
+
+    /// The URL could not be parsed.
+    ///
+    /// This is a **wrest-specific** catch-all for any parse failure reported
+    /// by WinHTTP's `WinHttpCrackUrl` that does not map to a more specific
+    /// variant.  It has no `url::ParseError` equivalent.
+    InvalidUrl,
+
+    /// The URL scheme is not `http` or `https`.
+    ///
+    /// This variant is **wrest-specific** and has no `url::ParseError`
+    /// equivalent.  Only `http` and `https` schemes are supported because
+    /// parsing is backed by WinHTTP.
+    UnsupportedScheme,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseError::EmptyHost => f.write_str("empty host"),
+            ParseError::IdnaError => f.write_str("invalid international domain name"),
+            ParseError::InvalidPort => f.write_str("invalid port number"),
+            ParseError::InvalidIpv4Address => f.write_str("invalid IPv4 address"),
+            ParseError::InvalidIpv6Address => f.write_str("invalid IPv6 address"),
+            ParseError::InvalidDomainCharacter => {
+                f.write_str("invalid domain character")
+            }
+            ParseError::RelativeUrlWithoutBase => {
+                f.write_str("relative URL without a base")
+            }
+            ParseError::RelativeUrlWithCannotBeABaseBase => {
+                f.write_str("relative URL with a cannot-be-a-base base")
+            }
+            ParseError::SetHostOnCannotBeABaseUrl => {
+                f.write_str("a cannot-be-a-base URL doesn't have a host to set")
+            }
+            ParseError::Overflow => {
+                f.write_str("URLs more than 4 GB are not supported")
+            }
+            ParseError::InvalidUrl => f.write_str("invalid URL"),
+            ParseError::UnsupportedScheme => f.write_str("unsupported URL scheme"),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+// ---------------------------------------------------------------------------
 // Url -- public type matching a subset of url::Url
 // ---------------------------------------------------------------------------
 
@@ -136,48 +251,126 @@ impl Url {
         self.fragment.as_deref()
     }
 
+    /// Return the serialized URL without the fragment component.
+    fn serialized_without_fragment(&self) -> String {
+        match self.serialized.split_once('#') {
+            Some((before, _)) => before.to_owned(),
+            None => self.serialized.clone(),
+        }
+    }
+
     /// Parse a URL string.
     ///
     /// Equivalent to `url::Url::parse()`. Only `http` and `https` schemes
     /// are supported.
-    pub fn parse(url: &str) -> Result<Self, Error> {
+    ///
+    /// Returns [`ParseError`] on failure, matching `url::Url::parse()` which
+    /// returns `url::ParseError`.
+    pub fn parse(url: &str) -> Result<Self, ParseError> {
         Url::parse_impl(url)
     }
 
     /// Join a relative URL against this base URL.
     ///
     /// Equivalent to `url::Url::join()`. Handles relative paths,
-    /// absolute paths, and full URLs. Dot-segments (`..`, `.`) are
-    /// resolved per RFC 3986 §5.2.4.
-    pub fn join(&self, input: &str) -> Result<Self, Error> {
-        // If input is already an absolute URL, just parse it directly
+    /// absolute paths, scheme-relative URLs, query-only references,
+    /// fragment-only references, and full URLs. Dot-segments (`..`, `.`)
+    /// are resolved per RFC 3986 §5.2.4.
+    ///
+    /// # Reference types
+    ///
+    /// | Input form           | Example              | Behaviour                                 |
+    /// |----------------------|----------------------|-------------------------------------------|
+    /// | Absolute URL         | `https://other/path` | Parsed independently                      |
+    /// | Scheme-relative      | `//other/path`       | Uses base scheme                          |
+    /// | Absolute path        | `/new/path`          | Replaces path, preserves authority        |
+    /// | Relative path        | `sub/page`           | Merged with base path directory           |
+    /// | Query-only           | `?q=1`               | Preserves base path                       |
+    /// | Fragment-only        | `#sec`               | Preserves base path & query               |
+    /// | Empty                | `""`                 | Returns base URL                          |
+    pub fn join(&self, input: &str) -> Result<Self, ParseError> {
+        // RFC 3986 §5.2.2: Reference Resolution
+
+        // Empty input returns the base URL unchanged.
+        if input.is_empty() {
+            return Url::parse_impl(&self.serialized);
+        }
+
+        // If input is an absolute URL, parse it directly.
         if input.starts_with("http://") || input.starts_with("https://") {
             return Url::parse_impl(input);
         }
 
-        // Build the resolved URL
-        let raw_path = if input.starts_with('/') {
-            // Absolute path -- replace path entirely
-            input.to_owned()
+        // Scheme-relative: //authority/path...
+        if input.starts_with("//") {
+            let resolved = format!("{}:{input}", self.scheme);
+            return Url::parse_impl(&resolved);
+        }
+
+        // Split input into path, query, and fragment components.
+        let (input_path, input_query, input_fragment) = split_reference(input);
+
+        // Fragment-only: #fragment
+        if input_path.is_empty() && input_query.is_none() {
+            // Return base URL with the new fragment.
+            let mut base_str = self.serialized_without_fragment();
+            if let Some(frag) = input_fragment {
+                base_str.push('#');
+                base_str.push_str(frag);
+            }
+            return Url::parse_impl(&base_str);
+        }
+
+        // Query-only: ?query (possibly with fragment)
+        if input_path.is_empty() && input_query.is_some() {
+            // Preserve base path, replace query (and fragment).
+            let mut base_str = format!(
+                "{}://{}",
+                self.scheme, self.host,
+            );
+            if self.explicit_port {
+                base_str.push_str(&format!(":{}", self.port));
+            }
+            base_str.push_str(&self.path);
+            if let Some(q) = input_query {
+                base_str.push('?');
+                base_str.push_str(q);
+            }
+            if let Some(f) = input_fragment {
+                base_str.push('#');
+                base_str.push_str(f);
+            }
+            return Url::parse_impl(&base_str);
+        }
+
+        // Path reference (absolute or relative).
+        let merged_path = if input_path.starts_with('/') {
+            // Absolute path -- replace entirely.
+            input_path.to_owned()
         } else {
-            // Relative path -- resolve against current path's directory.
+            // Relative path -- merge with base path's directory.
             // `parse_impl` guarantees `path` starts with '/', so
-            // `rfind('/')` always succeeds; `unwrap_or(0)` gives the
-            // same "/" prefix when the invariant holds and a safe
-            // fallback if it ever didn't.
-            let last_slash = self.path.rfind('/').unwrap_or(0);
-            let base_path = &self.path[..=last_slash];
-            format!("{base_path}{input}")
+            // `rsplit_once('/')` always succeeds; `unwrap_or` gives a
+            // safe fallback if it ever didn't.
+            let base_dir = self.path.rsplit_once('/').map_or("", |(dir, _)| dir);
+            format!("{base_dir}/{input_path}")
         };
 
-        // Resolve dot-segments per RFC 3986 §5.2.4
-        let resolved_path = remove_dot_segments(&raw_path);
+        let resolved_path = remove_dot_segments(&merged_path);
 
-        let mut base = format!("{}://{}", self.scheme, self.host);
+        let mut resolved = format!("{}://{}", self.scheme, self.host);
         if self.explicit_port {
-            base.push_str(&format!(":{}", self.port));
+            resolved.push_str(&format!(":{}", self.port));
         }
-        let resolved = format!("{base}{resolved_path}");
+        resolved.push_str(&resolved_path);
+        if let Some(q) = input_query {
+            resolved.push('?');
+            resolved.push_str(q);
+        }
+        if let Some(f) = input_fragment {
+            resolved.push('#');
+            resolved.push_str(f);
+        }
 
         Url::parse_impl(&resolved)
     }
@@ -238,8 +431,14 @@ impl AsRef<str> for Url {
     }
 }
 
+impl From<Url> for String {
+    fn from(url: Url) -> Self {
+        url.serialized
+    }
+}
+
 impl std::str::FromStr for Url {
-    type Err = crate::Error;
+    type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Url::parse_impl(s)
@@ -259,7 +458,7 @@ impl Ord for Url {
 }
 
 impl TryFrom<&str> for Url {
-    type Error = crate::Error;
+    type Error = ParseError;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         Url::parse_impl(s)
@@ -267,7 +466,7 @@ impl TryFrom<&str> for Url {
 }
 
 impl TryFrom<String> for Url {
-    type Error = crate::Error;
+    type Error = ParseError;
 
     fn try_from(s: String) -> Result<Self, Self::Error> {
         Url::parse_impl(&s)
@@ -304,21 +503,21 @@ pub trait IntoUrl: IntoUrlSealed {}
 
 impl IntoUrlSealed for &str {
     fn into_url(self) -> Result<Url, Error> {
-        Url::parse_impl(self)
+        Url::parse_impl(self).map_err(Error::from)
     }
 }
 impl IntoUrl for &str {}
 
 impl IntoUrlSealed for String {
     fn into_url(self) -> Result<Url, Error> {
-        Url::parse_impl(&self)
+        Url::parse_impl(&self).map_err(Error::from)
     }
 }
 impl IntoUrl for String {}
 
 impl IntoUrlSealed for &String {
     fn into_url(self) -> Result<Url, Error> {
-        Url::parse_impl(self)
+        Url::parse_impl(self).map_err(Error::from)
     }
 }
 impl IntoUrl for &String {}
@@ -343,21 +542,18 @@ impl Url {
     /// This is the sole constructor. Every `Url` is always fully cracked -- the
     /// WinHTTP-specific fields (`is_https`, `path_and_query`) are populated
     /// eagerly so downstream code never needs a separate conversion step.
-    pub(crate) fn parse_impl(url: &str) -> Result<Self, Error> {
+    pub(crate) fn parse_impl(url: &str) -> Result<Self, ParseError> {
         // Extract fragment from the original URL before WinHttpCrackUrl,
         // which escapes '#' to '%23' under ICU_ESCAPE.
-        let (url_for_crack, fragment) = match url.find('#') {
-            Some(pos) => {
-                let frag = url.get(pos + 1..).unwrap_or("");
-                (
-                    url.get(..pos).unwrap_or(""),
-                    if frag.is_empty() {
-                        None
-                    } else {
-                        Some(frag.to_owned())
-                    },
-                )
-            }
+        let (url_for_crack, fragment) = match url.split_once('#') {
+            Some((before, frag)) => (
+                before,
+                if frag.is_empty() {
+                    None
+                } else {
+                    Some(frag.to_owned())
+                },
+            ),
             None => (url, None),
         };
 
@@ -366,12 +562,13 @@ impl Url {
         // string: look for `://`, then find `@` before the next `/`.
         let (url_without_userinfo, username, password) = extract_userinfo(url_for_crack);
 
-        let cracked = crate::abi::winhttp_crack_url(url_without_userinfo.as_ref())?;
+        let cracked = crate::abi::winhttp_crack_url(url_without_userinfo.as_ref())
+            .map_err(|_| ParseError::InvalidUrl)?;
 
         let scheme = cracked.scheme;
         let is_https = scheme.eq_ignore_ascii_case("https");
         if !is_https && !scheme.eq_ignore_ascii_case("http") {
-            return Err(Error::builder(format!("unsupported URL scheme: {scheme}")));
+            return Err(ParseError::UnsupportedScheme);
         }
         let scheme_lower = scheme.to_ascii_lowercase();
 
@@ -467,36 +664,37 @@ impl Url {
 ///   `http://alice@host/path`        → `("http://host/path", "alice", None)`
 ///   `http://host/path`              → `("http://host/path", "", None)`
 fn extract_userinfo(url: &str) -> (std::borrow::Cow<'_, str>, String, Option<String>) {
-    // Find the authority start ("://")
-    let authority_start = match url.find("://") {
-        Some(pos) => pos + 3,
+    // Find the authority start ("://") -- RFC 3986 §3.2.
+    let (scheme_colon_slashes, authority_and_rest) = match url.split_once("://") {
+        Some((scheme, rest)) => (scheme, rest),
         None => return (std::borrow::Cow::Borrowed(url), String::new(), None),
     };
 
-    let authority = &url[authority_start..];
+    // Split authority from path/query/fragment at the first '/'
+    let authority_part = match authority_and_rest.split_once('/') {
+        Some((auth, _)) => auth,
+        None => authority_and_rest,
+    };
 
-    // Find the end of the authority (first '/' or end of string)
-    let authority_end = authority.find('/').unwrap_or(authority.len());
-    let authority_part = &authority[..authority_end];
-
-    // Look for '@' in the authority -- this separates userinfo from host
-    let at_pos = match authority_part.rfind('@') {
-        Some(pos) => pos,
+    // Look for '@' in the authority -- this separates userinfo from host.
+    let (userinfo, _host_part) = match authority_part.rsplit_once('@') {
+        Some(parts) => parts,
         None => return (std::borrow::Cow::Borrowed(url), String::new(), None),
     };
 
-    let userinfo = &authority_part[..at_pos];
-    let (raw_user, raw_pass) = match userinfo.find(':') {
-        Some(colon) => (&userinfo[..colon], Some(&userinfo[colon + 1..])),
+    let (raw_user, raw_pass) = match userinfo.split_once(':') {
+        Some((user, pass)) => (user, Some(pass)),
         None => (userinfo, None),
     };
 
     let username = percent_decode(raw_user);
     let password = raw_pass.map(percent_decode);
 
-    // Reconstruct the URL without userinfo
-    let host_onwards = &authority[at_pos + 1..];
-    let cleaned = format!("{}{host_onwards}", &url[..authority_start]);
+    // Reconstruct the URL without userinfo: skip past "userinfo@".
+    // We already found '@' in `authority_part` above, so `split_once('@')`
+    // on the full `authority_and_rest` always succeeds.
+    let after_at = authority_and_rest.split_once('@').map_or(authority_and_rest, |(_, rest)| rest);
+    let cleaned = format!("{scheme_colon_slashes}://{after_at}");
 
     (std::borrow::Cow::Owned(cleaned), username, password)
 }
@@ -566,6 +764,34 @@ fn remove_dot_segments(path: &str) -> String {
     }
 
     result
+}
+
+/// Split a URI reference into `(path, query, fragment)` components
+/// per RFC 3986 §3 syntax:
+///
+///     URI-reference = [ path ] [ "?" query ] [ "#" fragment ]
+///
+/// Supports the forms used by `Url::join`:
+/// - `""` → `("", None, None)`
+/// - `"#frag"` → `("", None, Some("frag"))`
+/// - `"?q=1"` → `("", Some("q=1"), None)`
+/// - `"?q=1#f"` → `("", Some("q=1"), Some("f"))`
+/// - `"path?q=1#f"` → `("path", Some("q=1"), Some("f"))`
+/// - `"/abs"` → `("/abs", None, None)`
+fn split_reference(input: &str) -> (&str, Option<&str>, Option<&str>) {
+    // Split off fragment first (RFC 3986 §3.5).
+    let (before_frag, fragment) = match input.split_once('#') {
+        Some((before, f)) => (before, if f.is_empty() { None } else { Some(f) }),
+        None => (input, None),
+    };
+
+    // Split path and query (RFC 3986 §3.4).
+    let (path, query) = match before_frag.split_once('?') {
+        Some((p, q)) => (p, if q.is_empty() { None } else { Some(q) }),
+        None => (before_frag, None),
+    };
+
+    (path, query, fragment)
 }
 
 /// Extract the query string from the "extra info" returned by
@@ -645,16 +871,6 @@ mod tests {
             .unwrap();
         assert!(parsed.path_and_query.contains("key=val"));
         assert!(parsed.path_and_query.contains("a=b"));
-    }
-
-    /// URLs that should fail to parse.
-    const PARSE_ERROR_CASES: &[&str] = &["not a url", "ftp://example.com/file"];
-
-    #[test]
-    fn invalid_urls_return_error() {
-        for &input in PARSE_ERROR_CASES {
-            assert!(input.into_url().is_err(), "expected Err for: {input}");
-        }
     }
 
     // -- IntoUrl impls --
@@ -840,7 +1056,7 @@ mod tests {
 
     // NOTE: Url::parse() valid-input coverage is provided by `parse_urls`
     // (via PARSE_CASES) above. Invalid-input coverage is provided by
-    // `invalid_urls_return_error` (via PARSE_ERROR_CASES).
+    // `parse_error_table` (via PARSE_ERROR_TABLE).
 
     // -- TryFrom tests --
 
@@ -858,40 +1074,153 @@ mod tests {
         assert!(err.is_err());
     }
 
-    /// Each entry: (base, reference, expected_path).
-    /// For absolute-URL references, expected_path is the full URL.
-    const JOIN_CASES: &[(&str, &str, &str)] = &[
-        // Absolute URL replaces everything
-        ("https://example.com/api/v1", "https://other.com/new", "https://other.com/new"),
-        // Absolute path
-        ("https://example.com/api/v1", "/new/path", "/new/path"),
-        // Relative path
-        ("https://example.com/api/v1", "v2", "/api/v2"),
-        // Dot segments
-        ("https://example.com/a/b/c", "./d", "/a/b/d"),
-        ("https://example.com/a/b/c", "../d", "/a/d"),
-        ("https://example.com/a/b/c/d", "../../e", "/a/e"),
-        ("https://example.com/a", "../../b", "/b"),
-        ("https://example.com/old/path", "/a/b/../c", "/a/c"),
-        // Trailing dot/dotdot
-        ("https://example.com/a/b/c", ".", "/a/b/"),
-        ("https://example.com/a/b/c", "..", "/a/"),
+    /// Each entry: (base, reference, expected_full_url, label).
+    const JOIN_CASES: &[(&str, &str, &str, &str)] = &[
+        // -- Absolute URL replaces everything --
+        (
+            "https://example.com/api/v1",
+            "https://other.com/new",
+            "https://other.com/new",
+            "absolute url",
+        ),
+        // -- Scheme-relative --
+        (
+            "https://example.com/api/v1",
+            "//other.com/path",
+            "https://other.com/path",
+            "scheme-relative",
+        ),
+        (
+            "http://example.com/a",
+            "//cdn.example.com/js/app.js",
+            "http://cdn.example.com/js/app.js",
+            "scheme-relative preserves http",
+        ),
+        // -- Absolute path --
+        (
+            "https://example.com/api/v1",
+            "/new/path",
+            "https://example.com/new/path",
+            "absolute path",
+        ),
+        // -- Relative path --
+        (
+            "https://example.com/api/v1",
+            "v2",
+            "https://example.com/api/v2",
+            "relative path (sibling)",
+        ),
+        // -- Dot segments --
+        (
+            "https://example.com/a/b/c",
+            "./d",
+            "https://example.com/a/b/d",
+            "dot-segment ./",
+        ),
+        (
+            "https://example.com/a/b/c",
+            "../d",
+            "https://example.com/a/d",
+            "dot-segment ../",
+        ),
+        (
+            "https://example.com/a/b/c/d",
+            "../../e",
+            "https://example.com/a/e",
+            "dot-segment ../../",
+        ),
+        (
+            "https://example.com/a",
+            "../../b",
+            "https://example.com/b",
+            "dot-segment past root",
+        ),
+        (
+            "https://example.com/old/path",
+            "/a/b/../c",
+            "https://example.com/a/c",
+            "dot-segment in absolute path",
+        ),
+        // -- Trailing dot/dotdot --
+        (
+            "https://example.com/a/b/c",
+            ".",
+            "https://example.com/a/b/",
+            "trailing dot",
+        ),
+        (
+            "https://example.com/a/b/c",
+            "..",
+            "https://example.com/a/",
+            "trailing dotdot",
+        ),
+        // -- Empty input → returns base URL --
+        (
+            "https://example.com/a/b?q=1#f",
+            "",
+            "https://example.com/a/b?q=1#f",
+            "empty input returns base",
+        ),
+        // -- Query-only --
+        (
+            "https://example.com/a/b",
+            "?q=1",
+            "https://example.com/a/b?q=1",
+            "query-only preserves path",
+        ),
+        (
+            "https://example.com/a/b?old=1",
+            "?new=2",
+            "https://example.com/a/b?new=2",
+            "query-only replaces query",
+        ),
+        (
+            "https://example.com/a/b",
+            "?q=1#sec",
+            "https://example.com/a/b?q=1#sec",
+            "query with fragment",
+        ),
+        // -- Fragment-only --
+        (
+            "https://example.com/a/b?q=1",
+            "#sec2",
+            "https://example.com/a/b?q=1#sec2",
+            "fragment-only preserves path+query",
+        ),
+        (
+            "https://example.com/a/b#old",
+            "#new",
+            "https://example.com/a/b#new",
+            "fragment-only replaces fragment",
+        ),
+        // -- Relative path with query and fragment --
+        (
+            "https://example.com/a/b",
+            "c?q=1#f",
+            "https://example.com/a/c?q=1#f",
+            "relative path with query+fragment",
+        ),
+        // -- Absolute path with query --
+        (
+            "https://example.com/a/b",
+            "/x/y?q=1",
+            "https://example.com/x/y?q=1",
+            "absolute path with query",
+        ),
     ];
 
     #[test]
     fn url_join() {
-        for &(base_str, reference, expected) in JOIN_CASES {
+        for &(base_str, reference, expected, label) in JOIN_CASES {
             let base = Url::parse(base_str).unwrap();
             let joined = base
                 .join(reference)
-                .unwrap_or_else(|e| panic!("join({base_str:?}, {reference:?}): {e}"));
-            if expected.starts_with("https://") {
-                // Absolute URL -- compare full URL
-                assert_eq!(joined.as_str(), expected, "join({base_str:?}, {reference:?})");
-            } else {
-                // Path comparison
-                assert_eq!(joined.path(), expected, "join({base_str:?}, {reference:?})");
-            }
+                .unwrap_or_else(|e| panic!("{label}: join({base_str:?}, {reference:?}): {e}"));
+            assert_eq!(
+                joined.as_str(),
+                expected,
+                "{label}: join({base_str:?}, {reference:?})",
+            );
         }
     }
 
@@ -901,6 +1230,15 @@ mod tests {
         let joined = base.join("/other").unwrap();
         assert_eq!(joined.port(), Some(9443));
         assert_eq!(joined.path(), "/other");
+
+        // Scheme-relative should NOT preserve port
+        let joined2 = base.join("//other.com/path").unwrap();
+        assert_eq!(joined2.host_str(), Some("other.com"));
+
+        // Query-only should preserve port
+        let joined3 = base.join("?q=1").unwrap();
+        assert_eq!(joined3.port(), Some(9443));
+        assert_eq!(joined3.query(), Some("q=1"));
     }
 
     // -- username/password tests --
@@ -1031,5 +1369,109 @@ mod tests {
             assert_eq!(url.as_str(), exp_str, "{label}: as_str()");
             assert_eq!(url.path_and_query, exp_pq, "{label}: path_and_query");
         }
+    }
+
+    // -- ParseError (data-driven) --
+
+    /// (input, expected_variant, expected_display, label)
+    const PARSE_ERROR_TABLE: &[(&str, ParseError, &str, &str)] = &[
+        (
+            "ftp://example.com/file",
+            ParseError::UnsupportedScheme,
+            "unsupported URL scheme",
+            "unsupported scheme",
+        ),
+        (
+            "not a url",
+            ParseError::InvalidUrl,
+            "invalid URL",
+            "invalid url (catch-all)",
+        ),
+    ];
+
+    #[test]
+    fn parse_error_table() {
+        for &(input, expected, display, label) in PARSE_ERROR_TABLE {
+            // Url::parse
+            let err = Url::parse(input).unwrap_err();
+            assert_eq!(err, expected, "{label}: variant");
+            assert_eq!(err.to_string(), display, "{label}: Display");
+
+            // FromStr
+            let err2: ParseError = input.parse::<Url>().unwrap_err();
+            assert_eq!(err2, expected, "{label}: FromStr variant");
+
+            // TryFrom<&str>
+            let err3 = Url::try_from(input).unwrap_err();
+            assert_eq!(err3, expected, "{label}: TryFrom<&str> variant");
+
+            // TryFrom<String>
+            let err4 = Url::try_from(input.to_owned()).unwrap_err();
+            assert_eq!(err4, expected, "{label}: TryFrom<String> variant");
+
+            // Conversion to crate::Error
+            let crate_err: crate::Error = err.into();
+            assert!(crate_err.is_builder(), "{label}: is_builder");
+            assert!(
+                crate_err.to_string().contains("builder error"),
+                "{label}: contains 'builder error'",
+            );
+            use std::error::Error as _;
+            let source = crate_err.source().expect("should have source");
+            assert!(
+                source.to_string().contains(display),
+                "{label}: source contains Display text",
+            );
+        }
+    }
+
+    /// All url::ParseError-mirrored variants have matching Display strings.
+    #[test]
+    fn parse_error_display_parity() {
+        let cases: &[(ParseError, &str)] = &[
+            (ParseError::EmptyHost, "empty host"),
+            (ParseError::IdnaError, "invalid international domain name"),
+            (ParseError::InvalidPort, "invalid port number"),
+            (ParseError::InvalidIpv4Address, "invalid IPv4 address"),
+            (ParseError::InvalidIpv6Address, "invalid IPv6 address"),
+            (ParseError::InvalidDomainCharacter, "invalid domain character"),
+            (ParseError::RelativeUrlWithoutBase, "relative URL without a base"),
+            (
+                ParseError::RelativeUrlWithCannotBeABaseBase,
+                "relative URL with a cannot-be-a-base base",
+            ),
+            (
+                ParseError::SetHostOnCannotBeABaseUrl,
+                "a cannot-be-a-base URL doesn't have a host to set",
+            ),
+            (ParseError::Overflow, "URLs more than 4 GB are not supported"),
+            (ParseError::InvalidUrl, "invalid URL"),
+            (ParseError::UnsupportedScheme, "unsupported URL scheme"),
+        ];
+        for (variant, expected) in cases {
+            assert_eq!(variant.to_string(), *expected, "{variant:?}");
+        }
+    }
+
+    #[test]
+    fn parse_error_traits() {
+        // std::error::Error
+        fn assert_std_error<T: std::error::Error>() {}
+        assert_std_error::<ParseError>();
+
+        // Debug, Clone, Copy, PartialEq, Eq
+        let err = ParseError::UnsupportedScheme;
+        let cloned = err;
+        let copied = cloned; // Copy
+        assert_eq!(format!("{err:?}"), format!("{copied:?}"));
+    }
+
+    // -- From<Url> for String --
+
+    #[test]
+    fn url_into_string() {
+        let url = Url::parse("https://example.com/path?q=1").unwrap();
+        let s: String = url.into();
+        assert_eq!(s, "https://example.com/path?q=1");
     }
 }

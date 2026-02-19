@@ -320,7 +320,7 @@ mod tests {
     fn await_win32_cancelled_signal() {
         let signal = CompletionSignal::<u32>::new();
         let future = signal.listen();
-        // Drop the signal without calling .signal() — the sender is gone.
+        // Drop the signal without calling .signal() -- the sender is gone.
         drop(signal);
         // The future resolves to Err(SignalCancelled), which converts
         // via From<SignalCancelled> into TestError::Cancelled.

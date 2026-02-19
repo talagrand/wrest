@@ -44,7 +44,10 @@ pub struct Body {
 
 pub(crate) enum BodyInner {
     /// In-memory body bytes.
-    Bytes(Vec<u8>),
+    ///
+    /// Stored as `Bytes` (reference-counted) so that `From<Bytes>`,
+    /// `From<&'static [u8]>`, etc., are zero-copy.
+    Bytes(Bytes),
     /// Streaming body -- sent incrementally via chunked transfer encoding.
     Stream(BoxStream),
 }
@@ -121,7 +124,7 @@ impl Body {
     #[cfg(test)]
     pub(crate) async fn into_bytes(self) -> Result<Vec<u8>, crate::Error> {
         match self.inner {
-            BodyInner::Bytes(v) => Ok(v),
+            BodyInner::Bytes(v) => Ok(v.to_vec()),
             BodyInner::Stream(mut stream) => {
                 use futures_util::StreamExt;
                 let mut buf = Vec::new();
@@ -139,7 +142,7 @@ impl Body {
 impl From<Vec<u8>> for Body {
     fn from(v: Vec<u8>) -> Self {
         Self {
-            inner: BodyInner::Bytes(v),
+            inner: BodyInner::Bytes(Bytes::from(v)),
         }
     }
 }
@@ -147,7 +150,7 @@ impl From<Vec<u8>> for Body {
 impl From<&'static [u8]> for Body {
     fn from(s: &'static [u8]) -> Self {
         Self {
-            inner: BodyInner::Bytes(s.to_vec()),
+            inner: BodyInner::Bytes(Bytes::from_static(s)),
         }
     }
 }
@@ -155,7 +158,7 @@ impl From<&'static [u8]> for Body {
 impl From<String> for Body {
     fn from(s: String) -> Self {
         Self {
-            inner: BodyInner::Bytes(s.into_bytes()),
+            inner: BodyInner::Bytes(Bytes::from(s)),
         }
     }
 }
@@ -163,7 +166,7 @@ impl From<String> for Body {
 impl From<&'static str> for Body {
     fn from(s: &'static str) -> Self {
         Self {
-            inner: BodyInner::Bytes(s.as_bytes().to_vec()),
+            inner: BodyInner::Bytes(Bytes::from_static(s.as_bytes())),
         }
     }
 }
@@ -171,7 +174,7 @@ impl From<&'static str> for Body {
 impl From<Bytes> for Body {
     fn from(b: Bytes) -> Self {
         Self {
-            inner: BodyInner::Bytes(b.to_vec()),
+            inner: BodyInner::Bytes(b),
         }
     }
 }
@@ -182,7 +185,7 @@ impl Default for Body {
     /// Matches [`reqwest::Body::default()`](https://docs.rs/reqwest/latest/reqwest/struct.Body.html#impl-Default-for-Body).
     fn default() -> Self {
         Self {
-            inner: BodyInner::Bytes(Vec::new()),
+            inner: BodyInner::Bytes(Bytes::new()),
         }
     }
 }

@@ -171,7 +171,7 @@ pub(crate) struct RequestState {
     /// may arrive later -- and WinHTTP could still reference the buffer.
     /// Storing it in the `Arc<RequestState>` (which outlives `HANDLE_CLOSING`)
     /// guarantees the buffer remains valid.
-    pub send_body: Mutex<Option<Vec<u8>>>,
+    pub send_body: Mutex<Option<bytes::Bytes>>,
 }
 
 impl RequestState {
@@ -712,7 +712,7 @@ pub(crate) async fn execute_request(
             // buffer if the future is dropped mid-write.
             let (frame_ptr, frame_len) = {
                 let mut guard = lock_or_clear(&state.send_body);
-                let stored = guard.insert(frame);
+                let stored = guard.insert(frame.into());
                 (stored.as_ptr() as usize, stored.len() as u32)
             };
 
@@ -724,7 +724,7 @@ pub(crate) async fn execute_request(
             let terminator = b"0\r\n\r\n".to_vec();
             let (term_ptr, term_len) = {
                 let mut guard = lock_or_clear(&state.send_body);
-                let stored = guard.insert(terminator);
+                let stored = guard.insert(terminator.into());
                 (stored.as_ptr() as usize, stored.len() as u32)
             };
 

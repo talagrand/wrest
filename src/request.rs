@@ -342,6 +342,16 @@ impl RequestBuilder {
     /// Serializes `form` as `application/x-www-form-urlencoded` and sets
     /// the `Content-Type` header accordingly.
     ///
+    /// # Deviation from reqwest
+    ///
+    /// reqwest uses `serde_urlencoded` for serialization.  wrest bridges
+    /// through `serde_json::to_value` → `form_urlencoded::Serializer`
+    /// to avoid the extra dependency.  For flat structs, maps, and
+    /// `&[(K, V)]` slices the output is identical.  Nested objects
+    /// produce a JSON-serialized string value in wrest (e.g.
+    /// `key=%7B%22a%22%3A1%7D`) whereas `serde_urlencoded` would
+    /// return an error.
+    ///
     /// Requires the `form` feature.
     #[cfg(feature = "form")]
     #[must_use]
