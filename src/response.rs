@@ -334,6 +334,48 @@ impl Response {
         })
     }
 
+    /// Decompose the response into metadata parts and a streaming body.
+    ///
+    /// The body streams chunks from the underlying WinHTTP handle.
+    /// Headers and extensions are moved out; only the body-streaming
+    /// internals (`raw`, `deadline`, `_client`) remain in the response
+    /// that drives the stream.
+    fn into_parts(self) -> (ResponseParts, crate::Body) {
+        let Response {
+            status,
+            version,
+            url,
+            headers,
+            extensions,
+            raw,
+            deadline,
+            _client: client,
+        } = self;
+
+        let parts = ResponseParts {
+            status,
+            version,
+            headers,
+            extensions,
+        };
+
+        // Reassemble a minimal Response that only carries the streaming
+        // state (raw handle, deadline, client keep-alive).
+        let streamer = Response {
+            status,
+            version,
+            url,
+            headers: HeaderMap::new(),
+            extensions: Extensions::default(),
+            raw,
+            deadline,
+            _client: client,
+        };
+        let body: crate::Body = streamer.into();
+
+        (parts, body)
+    }
+
     /// Returns the remote socket address of the server.
     ///
     /// # No-op -- reqwest compatibility
@@ -381,6 +423,32 @@ impl Response {
             buf.extend_from_slice(&part);
         }
         Ok(buf.freeze())
+    }
+}
+
+/// Metadata extracted from a [`Response`] by [`Response::into_parts`].
+struct ResponseParts {
+    status: StatusCode,
+    version: Version,
+    headers: HeaderMap,
+    extensions: Extensions,
+}
+
+/// Convert a `Response` into an `http::Response<Body>`.
+///
+/// The response body is streamed -- it is not buffered into memory.
+/// Headers, status, version, and extensions are preserved.
+impl From<Response> for http::Response<crate::Body> {
+    fn from(resp: Response) -> http::Response<crate::Body> {
+        let (parts, body) = resp.into_parts();
+        let mut out = http::Response::builder()
+            .status(parts.status)
+            .version(parts.version)
+            .body(body)
+            .expect("http::Response::builder should not fail with valid parts");
+        *out.headers_mut() = parts.headers;
+        *out.extensions_mut() = parts.extensions;
+        out
     }
 }
 
@@ -532,5 +600,24 @@ mod tests {
         assert_eq!(resp.version(), Version::HTTP_11);
         assert_eq!(resp.url().as_str(), "https://test.example.com/path");
         assert_eq!(resp.headers().get("x-custom").unwrap(), "test-value");
+    }
+
+    // -- From<Response> for Body / http::Response --
+
+    #[test]
+    fn response_conversions() {
+        // From<Response> for Body produces a stream.
+        let resp = synthetic(StatusCode::OK, HeaderMap::new());
+        let body: crate::Body = resp.into();
+        assert!(body.as_bytes().is_none(), "piped body should be a stream");
+
+        // From<Response> for http::Response preserves metadata.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test", "value".parse().unwrap());
+        let resp = synthetic(StatusCode::NOT_FOUND, headers);
+        let http_resp: http::Response<crate::Body> = resp.into();
+        assert_eq!(http_resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(http_resp.version(), Version::HTTP_11);
+        assert_eq!(http_resp.headers().get("x-test").unwrap(), "value");
     }
 }

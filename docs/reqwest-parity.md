@@ -57,11 +57,11 @@ Each row is a single public API item. Status meanings:
 |------|---------|-------|--------|-------|
 | `impl Service<Request> for Client` | ✓ | — | 💤 | Tower integration |
 | `impl Service<Request> for &Client` | ✓ | — | 💤 | Tower integration |
-| `impl From<Response> for Body` | ✓ | — | 💤 | pipe response as body of another request |
-| `impl From<http::Response<T>> for Response` | ✓ | — | 💤 | |
-| `impl From<Response> for http::Response<Body>` | ✓ | — | 💤 | |
-| `impl TryFrom<http::Request<T>> for Request` | ✓ | — | 💤 | |
-| `impl TryFrom<Request> for http::Request<Body>` | ✓ | — | 💤 | |
+| `impl From<Response> for Body` | ✓ | ✓ | ✅ | |
+| `impl From<http::Response<T>> for Response` | ✓ | — | � | Requires plumbing a pre-built body through `chunk()` |
+| `impl From<Response> for http::Response<Body>` | ✓ | ✓ | ✅ | |
+| `impl TryFrom<http::Request<T>> for Request` | ✓ | ✓ | ✅ | |
+| `impl TryFrom<Request> for http::Request<Body>` | ✓ | ✓ | ✅ | |
 
 ---
 

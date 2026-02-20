@@ -635,6 +635,100 @@ impl Url {
         }
         self.serialized = serialized;
     }
+
+    /// Build a `Url` directly from an [`http::Uri`] without re-parsing.
+    ///
+    /// The URI's scheme, authority, path and query are already validated
+    /// by the `http` crate, so we construct the `Url` from parts
+    /// instead of serializing and re-cracking through `WinHttpCrackUrl`.
+    pub(crate) fn from_http_uri(uri: &http::Uri) -> Result<Self, ParseError> {
+        let scheme = uri.scheme_str().ok_or(ParseError::RelativeUrlWithoutBase)?;
+        let is_https = scheme.eq_ignore_ascii_case("https");
+        if !is_https && !scheme.eq_ignore_ascii_case("http") {
+            return Err(ParseError::UnsupportedScheme);
+        }
+        let scheme_lower = scheme.to_ascii_lowercase();
+
+        let authority = uri.authority().ok_or(ParseError::EmptyHost)?;
+        let host = authority.host().to_owned();
+        if host.is_empty() {
+            return Err(ParseError::EmptyHost);
+        }
+
+        let default_port: u16 = if is_https { 443 } else { 80 };
+        let port = authority.port_u16().unwrap_or(default_port);
+        let explicit_port = authority.port_u16().is_some();
+
+        let (path, query) = match uri.path_and_query() {
+            Some(pq) => {
+                let p = pq.path();
+                let path = if p.is_empty() {
+                    "/".to_owned()
+                } else {
+                    p.to_owned()
+                };
+                let query = pq.query().map(|q| q.to_owned());
+                (path, query)
+            }
+            None => ("/".to_owned(), None),
+        };
+
+        let path_and_query = match &query {
+            Some(q) => format!("{path}?{q}"),
+            None => path.clone(),
+        };
+
+        // Extract userinfo from the authority (RFC 3986 §3.2.1).
+        let auth_str = authority.as_str();
+        let (username, password) = match auth_str.split_once('@') {
+            Some((userinfo, _)) => match userinfo.split_once(':') {
+                Some((u, p)) => (percent_decode(u), Some(percent_decode(p))),
+                None => (percent_decode(userinfo), None),
+            },
+            None => (String::new(), None),
+        };
+
+        // http::Uri does not carry fragments.
+        let fragment = None;
+
+        let mut serialized = if explicit_port {
+            format!("{scheme_lower}://{host}:{port}")
+        } else {
+            format!("{scheme_lower}://{host}")
+        };
+        serialized.push_str(&path_and_query);
+
+        Ok(Url {
+            serialized,
+            scheme: scheme_lower,
+            host,
+            port,
+            explicit_port,
+            path,
+            query,
+            fragment,
+            is_https,
+            path_and_query,
+            username,
+            password,
+        })
+    }
+
+    /// Convert this `Url` into an [`http::Uri`] from parts (no string roundtrip).
+    ///
+    /// Fragments are dropped because `http::Uri` does not carry them.
+    pub(crate) fn to_http_uri(&self) -> Result<http::Uri, http::Error> {
+        let authority = if self.explicit_port {
+            format!("{}:{}", self.host, self.port)
+        } else {
+            self.host.clone()
+        };
+        http::Uri::builder()
+            .scheme(self.scheme.as_str())
+            .authority(authority.as_str())
+            .path_and_query(self.path_and_query.as_str())
+            .build()
+    }
 }
 
 /// Extract userinfo (`user:password@`) from a URL string.
@@ -1423,5 +1517,123 @@ mod tests {
         let url = Url::parse("https://example.com/path?q=1").unwrap();
         let s: String = url.into();
         assert_eq!(s, "https://example.com/path?q=1");
+    }
+
+    // -- from_http_uri / to_http_uri --
+
+    #[test]
+    fn http_uri_conversion() {
+        // (label, input, (scheme, host, port, explicit_port), (path, query), (user, pass), contains)
+        type TestCase<'a> = (
+            &'a str,
+            &'a str,
+            (&'a str, &'a str, u16, Option<u16>),
+            (&'a str, Option<&'a str>),
+            (&'a str, Option<&'a str>),
+            &'a str,
+        );
+
+        let ok_cases: &[TestCase<'_>] = &[
+            (
+                "basic https",
+                "https://example.com/search?q=rust",
+                ("https", "example.com", 443, None),
+                ("/search", Some("q=rust")),
+                ("", None),
+                "https://example.com/search?q=rust",
+            ),
+            (
+                "http default port",
+                "http://example.com/index",
+                ("http", "example.com", 80, None),
+                ("/index", None),
+                ("", None),
+                "http://example.com/index",
+            ),
+            (
+                "explicit port",
+                "https://example.com:8443/p",
+                ("https", "example.com", 8443, Some(8443)),
+                ("/p", None),
+                ("", None),
+                ":8443",
+            ),
+            (
+                "userinfo with password",
+                "https://user:pass@example.com/x",
+                ("https", "example.com", 443, None),
+                ("/x", None),
+                ("user", Some("pass")),
+                "https://example.com/x",
+            ),
+            (
+                "userinfo without password",
+                "https://alice@example.com/y",
+                ("https", "example.com", 443, None),
+                ("/y", None),
+                ("alice", None),
+                "https://example.com/y",
+            ),
+            (
+                "port + query roundtrip",
+                "https://example.com:4433/api?v=2",
+                ("https", "example.com", 4433, Some(4433)),
+                ("/api", Some("v=2")),
+                ("", None),
+                ":4433",
+            ),
+        ];
+
+        for &(
+            label,
+            input,
+            (scheme, host, port, explicit_port),
+            (path, query),
+            (user, pass),
+            contains,
+        ) in ok_cases
+        {
+            let uri: http::Uri = input
+                .parse()
+                .unwrap_or_else(|e| panic!("{label}: parse URI: {e}"));
+            let url =
+                Url::from_http_uri(&uri).unwrap_or_else(|e| panic!("{label}: from_http_uri: {e}"));
+            assert_eq!(url.scheme(), scheme, "{label}: scheme");
+            assert_eq!(url.host_str(), Some(host), "{label}: host");
+            assert_eq!(url.port_or_known_default(), Some(port), "{label}: port");
+            assert_eq!(url.port(), explicit_port, "{label}: explicit_port");
+            assert_eq!(url.path(), path, "{label}: path");
+            assert_eq!(url.query(), query, "{label}: query");
+            assert_eq!(url.username(), user, "{label}: username");
+            assert_eq!(url.password(), pass, "{label}: password");
+            assert!(url.as_str().contains(contains), "{label}: serialized contains {contains:?}");
+
+            // Roundtrip: from_http_uri → to_http_uri preserves scheme + authority + path_and_query
+            let back = url
+                .to_http_uri()
+                .unwrap_or_else(|e| panic!("{label}: to_http_uri: {e}"));
+            assert_eq!(back.scheme_str(), uri.scheme_str(), "{label}: roundtrip scheme");
+            // Authority comparison skips userinfo (http::Uri builder doesn't inject it)
+            assert_eq!(
+                back.path_and_query().map(|pq| pq.as_str()),
+                uri.path_and_query().map(|pq| pq.as_str()),
+                "{label}: roundtrip path_and_query"
+            );
+        }
+
+        // Error cases: (label, URI, expected error)
+        let err_cases: &[(&str, http::Uri, ParseError)] = &[
+            (
+                "unsupported scheme",
+                "ftp://example.com/file".parse().unwrap(),
+                ParseError::UnsupportedScheme,
+            ),
+            ("no scheme", http::Uri::from_static("/relative"), ParseError::RelativeUrlWithoutBase),
+        ];
+
+        for (label, uri, expected) in err_cases {
+            let err = Url::from_http_uri(uri).unwrap_err();
+            assert_eq!(err, *expected, "{label}");
+        }
     }
 }

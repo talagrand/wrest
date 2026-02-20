@@ -158,6 +158,50 @@ impl Request {
         self.body
     }
 }
+
+/// Build a `Request` from an `http::Request`.
+///
+/// The URI is parsed into a [`Url`]; this fails if the URI is not a valid
+/// absolute `http` or `https` URL.
+impl<T: Into<crate::Body>> TryFrom<http::Request<T>> for Request {
+    type Error = crate::Error;
+
+    fn try_from(req: http::Request<T>) -> Result<Self, Self::Error> {
+        let (parts, body) = req.into_parts();
+        let url = Url::from_http_uri(&parts.uri).map_err(crate::Error::from)?;
+        Ok(Request {
+            method: parts.method,
+            url,
+            headers: parts.headers,
+            body: Some(body.into()),
+            timeout: None,
+            version: parts.version,
+        })
+    }
+}
+
+/// Convert a `Request` into an `http::Request<Body>`.
+///
+/// The URL is serialized as the URI. This fails if the URL cannot be
+/// parsed as a valid `http::Uri`.
+impl TryFrom<Request> for http::Request<crate::Body> {
+    type Error = crate::Error;
+
+    fn try_from(req: Request) -> Result<Self, Self::Error> {
+        let uri = req
+            .url
+            .to_http_uri()
+            .map_err(|e| crate::Error::builder("invalid URI").with_source(e))?;
+        let mut out = http::Request::builder()
+            .method(req.method)
+            .uri(uri)
+            .version(req.version)
+            .body(req.body.unwrap_or_default())
+            .map_err(|e| crate::Error::builder("failed to build http::Request").with_source(e))?;
+        *out.headers_mut() = req.headers;
+        Ok(out)
+    }
+}
 /// A builder for an HTTP request.
 ///
 /// Created via [`Client::get()`](crate::Client::get) or
@@ -1283,5 +1327,45 @@ mod tests {
         let url = clone.url.unwrap();
         assert_eq!(url.as_str(), "https://example.com:9443/api?key=val#frag");
         assert_eq!(url.query(), Some("key=val"));
+    }
+
+    // -- http::Request <-> Request round-trip --
+
+    #[test]
+    fn http_request_roundtrip() {
+        // http::Request → wrest::Request → http::Request
+        let original = http::Request::builder()
+            .method(http::Method::POST)
+            .uri("https://example.com/api")
+            .header("x-custom", "value")
+            .version(http::Version::HTTP_11)
+            .body("payload")
+            .unwrap();
+
+        let wrest_req: Request = original.try_into().unwrap();
+        assert_eq!(wrest_req.method(), &http::Method::POST);
+        assert_eq!(wrest_req.url().as_str(), "https://example.com/api");
+        assert_eq!(wrest_req.headers().get("x-custom").unwrap(), "value");
+        assert_eq!(wrest_req.body().unwrap().as_bytes().unwrap(), b"payload");
+
+        let back: http::Request<crate::Body> = wrest_req.try_into().unwrap();
+        assert_eq!(back.method(), http::Method::POST);
+        assert_eq!(back.uri(), "https://example.com/api");
+        assert_eq!(back.version(), http::Version::HTTP_11);
+        assert_eq!(back.headers().get("x-custom").unwrap(), "value");
+        assert_eq!(back.body().as_bytes().unwrap(), b"payload");
+
+        // No body → default empty body.
+        let no_body = Request::new(http::Method::GET, "https://example.com".parse().unwrap());
+        let http_req: http::Request<crate::Body> = no_body.try_into().unwrap();
+        assert_eq!(http_req.body().as_bytes().unwrap(), b"");
+
+        // Unsupported scheme → error.
+        let bad = http::Request::builder()
+            .uri("ftp://not-supported.com")
+            .body("")
+            .unwrap();
+        let result: Result<Request, _> = bad.try_into();
+        assert!(result.is_err(), "unsupported scheme should fail");
     }
 }

@@ -190,6 +190,15 @@ impl Default for Body {
     }
 }
 
+/// A `Response` can be piped as the `Body` of another request.
+///
+/// The response body is streamed -- it is not buffered into memory.
+impl From<crate::Response> for Body {
+    fn from(resp: crate::Response) -> Body {
+        Body::wrap_stream(resp.bytes_stream())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
