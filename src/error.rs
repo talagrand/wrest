@@ -286,12 +286,6 @@ impl std::error::Error for Error {
     }
 }
 
-impl From<crate::url::ParseError> for Error {
-    fn from(e: crate::url::ParseError) -> Self {
-        Error::builder(e.to_string()).with_source(e)
-    }
-}
-
 /// Classify a Win32 / WinHTTP error code into an [`ErrorKind`].
 ///
 /// This is the **single** place in the crate that classifies WinHTTP

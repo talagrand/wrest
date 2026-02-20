@@ -19,12 +19,12 @@
 ///     .redirect(redirect::Policy::limited(5))
 ///     .build()?;
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Policy {
     pub(crate) inner: PolicyInner,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) enum PolicyInner {
     /// Follow redirects (up to a maximum count).
     Limited(u32),
@@ -83,14 +83,6 @@ mod tests {
         for (label, policy, check) in &cases {
             assert!(check(&policy.inner), "Policy::{label}: unexpected inner");
         }
-    }
-
-    #[test]
-    fn policy_clone() {
-        let p = Policy::limited(3);
-        let p2 = p.clone();
-        assert!(matches!(p.inner, PolicyInner::Limited(3)));
-        assert!(matches!(p2.inner, PolicyInner::Limited(3)));
     }
 
     #[test]

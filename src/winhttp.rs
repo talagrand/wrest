@@ -1223,7 +1223,7 @@ mod tests {
             },
         ];
 
-        for case in &cases {
+        for case in cases {
             let server = MockServer::start().await;
 
             // Mount source mock (either 200 or redirect)
@@ -1263,8 +1263,8 @@ mod tests {
                 read_timeout_ms: 0,
                 verbose: false,
                 max_connections_per_host: None,
-                proxy: case.proxy.clone(),
-                redirect_policy: case.redirect_policy.clone(),
+                proxy: case.proxy,
+                redirect_policy: case.redirect_policy,
                 http1_only: false,
             };
 

@@ -31,9 +31,8 @@ use crate::Error;
 
 /// An error type for URL parsing failures.
 ///
-/// Returned by [`Url::parse`], [`Url::join`],
-/// [`FromStr`](std::str::FromStr), and
-/// [`TryFrom`] implementations on [`Url`].
+/// Returned by [`Url::parse`], [`Url::join`], and
+/// [`FromStr`](std::str::FromStr).
 ///
 /// # Variant names
 ///
@@ -61,7 +60,7 @@ use crate::Error;
 /// Variants marked "No" exist for pattern-matching compatibility and will
 /// never be returned by wrest's parser.  Code that just propagates with `?`
 /// is unaffected regardless.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ParseError {
     /// The URL has an empty host.
@@ -448,22 +447,6 @@ impl Ord for Url {
     }
 }
 
-impl TryFrom<&str> for Url {
-    type Error = ParseError;
-
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
-        Url::parse_impl(s)
-    }
-}
-
-impl TryFrom<String> for Url {
-    type Error = ParseError;
-
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        Url::parse_impl(&s)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // IntoUrl
 // ---------------------------------------------------------------------------
@@ -491,21 +474,21 @@ pub trait IntoUrl: IntoUrlSealed {}
 
 impl IntoUrlSealed for &str {
     fn into_url(self) -> Result<Url, Error> {
-        Url::parse_impl(self).map_err(Error::from)
+        Url::parse_impl(self).map_err(|e| Error::builder(e.to_string()).with_source(e))
     }
 }
 impl IntoUrl for &str {}
 
 impl IntoUrlSealed for String {
     fn into_url(self) -> Result<Url, Error> {
-        Url::parse_impl(&self).map_err(Error::from)
+        Url::parse_impl(&self).map_err(|e| Error::builder(e.to_string()).with_source(e))
     }
 }
 impl IntoUrl for String {}
 
 impl IntoUrlSealed for &String {
     fn into_url(self) -> Result<Url, Error> {
-        Url::parse_impl(self).map_err(Error::from)
+        Url::parse_impl(self).map_err(|e| Error::builder(e.to_string()).with_source(e))
     }
 }
 impl IntoUrl for &String {}
@@ -516,13 +499,6 @@ impl IntoUrlSealed for Url {
     }
 }
 impl IntoUrl for Url {}
-
-impl IntoUrlSealed for &Url {
-    fn into_url(self) -> Result<Url, Error> {
-        Ok(self.clone())
-    }
-}
-impl IntoUrl for &Url {}
 
 impl Url {
     /// Parse a URL string using `WinHttpCrackUrl`.
@@ -1055,14 +1031,6 @@ mod tests {
     }
 
     #[test]
-    fn into_url_for_url_ref() {
-        let url = "https://example.com/test?q=1".into_url().unwrap();
-        let url2 = (&url).into_url().unwrap();
-        assert_eq!(url2.as_str(), "https://example.com/test?q=1");
-        assert_eq!(url2.path_and_query, "/test?q=1");
-    }
-
-    #[test]
     fn url_path_query_fragment_combinations() {
         // (input, expected_path, expected_query, expected_fragment)
         let cases: &[(&str, &str, Option<&str>, Option<&str>)] = &[
@@ -1143,22 +1111,6 @@ mod tests {
     // NOTE: Url::parse() valid-input coverage is provided by `parse_urls`
     // (via PARSE_CASES) above. Invalid-input coverage is provided by
     // `parse_error_table` (via PARSE_ERROR_TABLE).
-
-    // -- TryFrom tests --
-
-    #[test]
-    fn url_try_from_valid() {
-        let from_str = Url::try_from("https://example.com/path").unwrap();
-        let from_string = Url::try_from(String::from("https://example.com/path")).unwrap();
-        assert_eq!(from_str.as_str(), "https://example.com/path");
-        assert_eq!(from_string.as_str(), "https://example.com/path");
-    }
-
-    #[test]
-    fn url_try_from_invalid() {
-        let err = Url::try_from("not valid");
-        assert!(err.is_err());
-    }
 
     /// Each entry: (base, reference, expected_full_url, label).
     const JOIN_CASES: &[(&str, &str, &str, &str)] = &[
@@ -1438,34 +1390,15 @@ mod tests {
 
     #[test]
     fn parse_error_table() {
-        for &(input, expected, display, label) in PARSE_ERROR_TABLE {
+        for (input, expected, display, label) in PARSE_ERROR_TABLE {
             // Url::parse
             let err = Url::parse(input).unwrap_err();
-            assert_eq!(err, expected, "{label}: variant");
-            assert_eq!(err.to_string(), display, "{label}: Display");
+            assert_eq!(&err, expected, "{label}: variant");
+            assert_eq!(err.to_string(), *display, "{label}: Display");
 
             // FromStr
             let err2: ParseError = input.parse::<Url>().unwrap_err();
-            assert_eq!(err2, expected, "{label}: FromStr variant");
-
-            // TryFrom<&str>
-            let err3 = Url::try_from(input).unwrap_err();
-            assert_eq!(err3, expected, "{label}: TryFrom<&str> variant");
-
-            // TryFrom<String>
-            let err4 = Url::try_from(input.to_owned()).unwrap_err();
-            assert_eq!(err4, expected, "{label}: TryFrom<String> variant");
-
-            // Conversion to crate::Error
-            let crate_err: crate::Error = err.into();
-            assert!(crate_err.is_builder(), "{label}: is_builder");
-            assert!(
-                crate_err.to_string().contains("builder error"),
-                "{label}: contains 'builder error'",
-            );
-            use std::error::Error as _;
-            let source = crate_err.source().expect("should have source");
-            assert!(source.to_string().contains(display), "{label}: source contains Display text",);
+            assert_eq!(&err2, expected, "{label}: FromStr variant");
         }
     }
 
@@ -1503,11 +1436,10 @@ mod tests {
         fn assert_std_error<T: std::error::Error>() {}
         assert_std_error::<ParseError>();
 
-        // Debug, Clone, Copy, PartialEq, Eq
+        // Debug, Clone, PartialEq, Eq
         let err = ParseError::UnsupportedScheme;
-        let cloned = err;
-        let copied = cloned; // Copy
-        assert_eq!(format!("{err:?}"), format!("{copied:?}"));
+        let cloned = err.clone();
+        assert_eq!(format!("{err:?}"), format!("{cloned:?}"));
     }
 
     // -- From<Url> for String --

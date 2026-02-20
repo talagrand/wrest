@@ -62,6 +62,9 @@ Each row is a single public API item. Status meanings:
 | `impl From<Response> for http::Response<Body>` | ✓ | ✓ | ✅ | |
 | `impl TryFrom<http::Request<T>> for Request` | ✓ | ✓ | ✅ | |
 | `impl TryFrom<Request> for http::Request<Body>` | ✓ | ✓ | ✅ | |
+| `impl http_body::Body for Body` | ✓ | — | 🔒 | wrest uses WinHTTP streaming, not `http-body` trait |
+| `impl ResponseBuilderExt for http::response::Builder` | ✓ | — | 💤 | |
+| `impl IntoProxy for S: IntoUrl` | ✓ | — | 💤 | Proxy config is simpler in wrest |
 
 ---
 
@@ -309,8 +312,11 @@ Each row is a single public API item. Status meanings:
 | `content_length()` | ✓ | — | 💤 | |
 | `From<Bytes>` | ✓ (zero-copy) | ✓ (zero-copy) | ✅ | |
 | `From<&'static [u8]>` | ✓ (zero-copy) | ✓ (zero-copy) | ✅ | |
+| `From<Vec<u8>>` | ✓ | ✓ | ✅ | |
+| `From<String>` | ✓ | ✓ | ✅ | |
+| `From<&'static str>` | ✓ | ✓ | ✅ | |
 | `From<tokio::fs::File>` | ✓ | — | 💤 | |
-| `From<Response>` | ✓ | — | 💤 | pipe response as body of another request |
+| `From<Response>` | ✓ | ✓ | ✅ | pipe response as body of another request |
 
 ---
 
@@ -383,7 +389,6 @@ are feasible future work unless noted otherwise.
 | `Clone`, `Eq`, `Hash` | ✓ | ✓ | ✅ | |
 | `Ord`, `PartialOrd` | ✓ | ✓ | ✅ | |
 | `FromStr` | ✓ | ✓ | ✅ | Err = `ParseError` |
-| `TryFrom<&str>` / `TryFrom<String>` | ✓ | ✓ | ✅ | Error = `ParseError` |
 | `AsRef<str>` | ✓ | ✓ | ✅ | |
 | `Serialize` / `Deserialize` | ✓ (via `url`) | ✓ (`json` feature) | ✅ | Different feature gate |
 | `From<Url> for String` | ✓ | ✓ | ✅ | |

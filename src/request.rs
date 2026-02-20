@@ -168,7 +168,8 @@ impl<T: Into<crate::Body>> TryFrom<http::Request<T>> for Request {
 
     fn try_from(req: http::Request<T>) -> Result<Self, Self::Error> {
         let (parts, body) = req.into_parts();
-        let url = Url::from_http_uri(&parts.uri).map_err(crate::Error::from)?;
+        let url = Url::from_http_uri(&parts.uri)
+            .map_err(|e| crate::Error::builder(e.to_string()).with_source(e))?;
         Ok(Request {
             method: parts.method,
             url,
