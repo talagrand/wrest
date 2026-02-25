@@ -175,26 +175,26 @@ mod tests {
         let ab: [u16; 2] = [b'A' as u16, b'B' as u16];
         let ok_null: [u16; 3] = [b'O' as u16, b'K' as u16, 0];
 
-        // (label, ptr, byte_len, expected)
+        // (ptr, byte_len, expected, label)
         // SAFETY: all pointers are valid for their byte_len.
-        let cases: Vec<(&str, *mut std::ffi::c_void, u32, &str)> = vec![
-            ("null_ptr", std::ptr::null_mut(), 10, ""),
-            ("zero_len", ab.as_ptr() as *mut std::ffi::c_void, 0, ""),
+        let cases: Vec<(*mut std::ffi::c_void, u32, &str, &str)> = vec![
+            (std::ptr::null_mut(), 10, "", "null_ptr"),
+            (ab.as_ptr() as *mut std::ffi::c_void, 0, "", "zero_len"),
             (
-                "trims_trailing_null",
                 ok_null.as_ptr() as *mut std::ffi::c_void,
                 6, // 3 u16 = 6 bytes
                 "OK",
+                "trims_trailing_null",
             ),
             (
-                "no_trailing_null",
                 ab.as_ptr() as *mut std::ffi::c_void,
                 4, // 2 u16 = 4 bytes
                 "AB",
+                "no_trailing_null",
             ),
         ];
 
-        for (label, ptr, byte_len, expected) in &cases {
+        for (ptr, byte_len, expected, label) in &cases {
             let result = unsafe { wide_to_string_lossy(*ptr, *byte_len) };
             assert_eq!(result, *expected, "wide_to_string_lossy {label}");
         }

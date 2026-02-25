@@ -1253,41 +1253,41 @@ mod tests {
 
     #[test]
     fn builder_field_storage_table() {
-        // (label, setup, check)
+        // (setup, check, label)
         type TestCase<'a> =
-            (&'a str, fn(ClientBuilder) -> ClientBuilder, fn(&ClientBuilder) -> bool);
+            (fn(ClientBuilder) -> ClientBuilder, fn(&ClientBuilder) -> bool, &'a str);
         let cases: &[TestCase] = &[
             (
-                "send_timeout",
                 |b| b.send_timeout(Duration::from_secs(5)),
                 |b| b.send_timeout == Some(Duration::from_secs(5)),
+                "send_timeout",
             ),
             (
-                "read_timeout",
                 |b| b.read_timeout(Duration::from_secs(7)),
                 |b| b.read_timeout == Some(Duration::from_secs(7)),
+                "read_timeout",
             ),
             (
-                "redirect_policy",
                 |b| b.redirect(crate::redirect::Policy::none()),
                 |b| b.redirect_policy.is_some(),
+                "redirect_policy",
             ),
             (
-                "danger_accept_invalid_certs",
                 |b| b.danger_accept_invalid_certs(true),
                 |b| b.danger_accept_invalid_certs,
+                "danger_accept_invalid_certs",
             ),
-            ("http1_only", |b| b.http1_only(), |b| b.http1_only),
-            ("no_proxy", |b| b.no_proxy(), |b| b.proxy_config.is_some()),
+            (|b| b.http1_only(), |b| b.http1_only, "http1_only"),
+            (|b| b.no_proxy(), |b| b.proxy_config.is_some(), "no_proxy"),
             // Duration::MAX should saturate to i32::MAX, not panic
             (
-                "connect_timeout_max",
                 |b| b.connect_timeout(Duration::MAX),
                 |b| b.connect_timeout == Some(Duration::MAX),
+                "connect_timeout_max",
             ),
         ];
 
-        for &(label, setup, check) in cases {
+        for &(setup, check, label) in cases {
             let b = setup(ClientBuilder::new());
             assert!(check(&b), "builder.{label}() was not stored");
         }
@@ -1295,19 +1295,19 @@ mod tests {
 
     #[test]
     fn builder_user_agent_table() {
-        // (label, value_bytes, expect_ok)
+        // (value_bytes, expect_ok, label)
         //
         // Three user_agent() code paths:
         //   1. Valid visible-ASCII string → stored in builder
         //   2. Non-ASCII bytes (0x01) → HeaderValue::try_from fails → deferred error
         //   3. Opaque bytes (0x80..) → HeaderValue OK, to_str() fails → deferred error
-        let cases: &[(&str, &[u8], bool)] = &[
-            ("valid", b"valid-agent", true),
-            ("try_from fails", b"bad\x01agent", false),
-            ("to_str fails", &[0x80, 0xFF], false),
+        let cases: &[(&[u8], bool, &str)] = &[
+            (b"valid-agent", true, "valid"),
+            (b"bad\x01agent", false, "try_from fails"),
+            (&[0x80, 0xFF], false, "to_str fails"),
         ];
 
-        for &(label, value, expect_ok) in cases {
+        for &(value, expect_ok, label) in cases {
             let hv = http::HeaderValue::from_bytes(value);
             let b = match hv {
                 Ok(v) => ClientBuilder::new().user_agent(v),

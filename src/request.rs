@@ -1037,14 +1037,14 @@ mod tests {
 
     #[test]
     fn request_try_clone_table() {
-        // (label, body, expect_clone)
-        let cases: Vec<(&str, Option<crate::Body>, bool)> = vec![
-            ("no body", None, true),
-            ("bytes body", Some(crate::Body::from("payload")), true),
+        // (body, expect_clone, label)
+        let cases: Vec<(Option<crate::Body>, bool, &str)> = vec![
+            (None, true, "no body"),
+            (Some(crate::Body::from("payload")), true, "bytes body"),
             // Stream body cannot be cloned -- try_clone returns None.
         ];
 
-        for (label, body, _) in cases {
+        for (body, _, label) in cases {
             let mut req = Request::new(http::Method::POST, "https://example.com".parse().unwrap());
             req.body = body;
             *req.timeout_mut() = Some(Duration::from_secs(7));
