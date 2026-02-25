@@ -765,15 +765,15 @@ mod tests {
 
     #[test]
     fn proxy_apply_to_table() {
-        // (label, scheme, url, expected_http_url, expected_https_url)
-        type TestCase<'a> = (&'a str, &'a str, &'a str, Option<&'a str>, Option<&'a str>);
+        // (scheme, url, expected_http_url, expected_https_url, label)
+        type TestCase<'a> = (&'a str, &'a str, Option<&'a str>, Option<&'a str>, &'a str);
         let cases: &[TestCase] = &[
-            ("http only", "http", "http://http-only:8080", Some("http://http-only:8080"), None),
-            ("https only", "https", "http://https-only:8080", None, Some("http://https-only:8080")),
+            ("http", "http://http-only:8080", Some("http://http-only:8080"), None, "http only"),
+            ("https", "http://https-only:8080", None, Some("http://https-only:8080"), "https only"),
         ];
 
         let creds = Some(("u".to_owned(), "p".to_owned()));
-        for &(label, scheme, url, exp_http, exp_https) in cases {
+        for &(scheme, url, exp_http, exp_https, label) in cases {
             let proxy = match scheme {
                 "http" => Proxy::http(url),
                 "https" => Proxy::https(url),

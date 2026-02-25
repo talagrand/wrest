@@ -433,17 +433,17 @@ mod tests {
     /// `true`; all other `is_*` methods return `false`.
     #[test]
     fn error_kind_exclusivity_table() {
-        // (error, label, check) -- one entry per ErrorKind.
+        // (error, check, label) -- one entry per ErrorKind.
         // The table itself doubles as the cross-check matrix: for each
         // error we call every other entry's function pointer and verify
         // only the designated one fires.
-        type TestCase<'a> = (Error, &'a str, fn(&Error) -> bool);
+        type TestCase<'a> = (Error, fn(&Error) -> bool, &'a str);
         let cases: Vec<TestCase> = vec![
-            (Error::builder("b"), "builder", Error::is_builder),
-            (Error::request("r"), "request", Error::is_request),
-            (Error::timeout("t"), "timeout", Error::is_timeout),
-            (Error::body("d"), "body", Error::is_body),
-            (Error::decode("d"), "decode", Error::is_decode),
+            (Error::builder("b"), Error::is_builder, "builder"),
+            (Error::request("r"), Error::is_request, "request"),
+            (Error::timeout("t"), Error::is_timeout, "timeout"),
+            (Error::body("d"), Error::is_body, "body"),
+            (Error::decode("d"), Error::is_decode, "decode"),
             (
                 Error {
                     kind: ErrorKind::Connect,
@@ -452,8 +452,8 @@ mod tests {
                     status: None,
                     url: None,
                 },
-                "connect",
                 Error::is_connect,
+                "connect",
             ),
             (
                 Error {
@@ -463,8 +463,8 @@ mod tests {
                     status: Some(StatusCode::NOT_FOUND),
                     url: Some(Box::new("https://example.com/missing".into_url().unwrap())),
                 },
-                "status",
                 Error::is_status,
+                "status",
             ),
             (
                 Error {
@@ -474,8 +474,8 @@ mod tests {
                     status: None,
                     url: None,
                 },
-                "redirect",
                 Error::is_redirect,
+                "redirect",
             ),
         ];
 
@@ -490,18 +490,18 @@ mod tests {
                     status: None,
                     url: None,
                 },
-                "upgrade",
                 Error::is_upgrade as fn(&Error) -> bool,
+                "upgrade",
             ));
             v
         };
 
-        for (err, label, check) in &cases {
+        for (err, check, label) in &cases {
             assert!(check(err), "{label}: own is_*() should be true");
 
             // Cross-check: every *other* entry's function pointer must
             // return false for this error.
-            for (_, other_label, other_check) in &cases {
+            for (_, other_check, other_label) in &cases {
                 if *other_label != *label {
                     assert!(!other_check(err), "{label}: is_{other_label}() should be false");
                 }
@@ -509,7 +509,7 @@ mod tests {
         }
 
         // Verify status() and url() accessors on the Status entry.
-        let status_err = &cases.iter().find(|(_, l, _)| *l == "status").unwrap().0;
+        let status_err = &cases.iter().find(|(_, _, l)| *l == "status").unwrap().0;
         assert_eq!(status_err.status(), Some(StatusCode::NOT_FOUND));
         assert_eq!(status_err.url().map(|u| u.as_str()), Some("https://example.com/missing"));
 
@@ -611,30 +611,30 @@ mod tests {
     /// `io::ErrorKind` mapping -- all in one table.
     #[test]
     fn from_win32_table() {
-        // (code, label, kind check, expected io::ErrorKind or None)
-        type TestCase<'a> = (u32, &'a str, fn(&Error) -> bool, Option<io::ErrorKind>);
+        // (code, kind check, expected io::ErrorKind or None, label)
+        type TestCase<'a> = (u32, fn(&Error) -> bool, Option<io::ErrorKind>, &'a str);
         let cases: &[TestCase] = &[
             (
                 ERROR_WINHTTP_CANNOT_CONNECT,
-                "connect",
                 Error::is_connect,
                 Some(io::ErrorKind::ConnectionRefused),
+                "connect",
             ),
-            (ERROR_WINHTTP_NAME_NOT_RESOLVED, "connect (dns)", Error::is_connect, None),
+            (ERROR_WINHTTP_NAME_NOT_RESOLVED, Error::is_connect, None, "connect (dns)"),
             (
                 ERROR_WINHTTP_CONNECTION_ERROR,
-                "connect (conn)",
                 Error::is_connect,
                 Some(io::ErrorKind::ConnectionReset),
+                "connect (conn)",
             ),
-            (ERROR_WINHTTP_SECURE_FAILURE, "connect (tls)", Error::is_connect, None),
-            (ERROR_WINHTTP_TIMEOUT, "timeout", Error::is_timeout, Some(io::ErrorKind::TimedOut)),
-            (ERROR_WINHTTP_REDIRECT_FAILED, "redirect", Error::is_redirect, None),
+            (ERROR_WINHTTP_SECURE_FAILURE, Error::is_connect, None, "connect (tls)"),
+            (ERROR_WINHTTP_TIMEOUT, Error::is_timeout, Some(io::ErrorKind::TimedOut), "timeout"),
+            (ERROR_WINHTTP_REDIRECT_FAILED, Error::is_redirect, None, "redirect"),
             // Unknown code falls through to Request.
-            (0xFFFF, "unknown", Error::is_request, None),
+            (0xFFFF, Error::is_request, None, "unknown"),
         ];
 
-        for &(code, label, check, expected_io_kind) in cases {
+        for &(code, check, expected_io_kind, label) in cases {
             let err = Error::from_win32(code);
 
             // ErrorKind classification
