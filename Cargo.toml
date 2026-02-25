@@ -166,9 +166,8 @@ panicking-compat = []
 
 ## Activates every user-facing feature *except* `always-reqwest`.
 ##
-## Convenient for CI, docs.rs, and downstream crates that want
-## full coverage without accidentally disabling the native WinHTTP backend.
-## Double-underscore prefix marks it as an internal implementation detail.
+## Convenient for CI, docs.rs, and development that want full feature
+## coverage without accidentally disabling the native WinHTTP backend.
 __all-native-features = [
     "charset", "http2", "default-tls", "native-tls", "system-proxy",
     "json", "form", "query", "tracing",

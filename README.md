@@ -147,7 +147,7 @@ features are not available because WinHTTP handles them internally or
 they haven't been added yet:
 
 - **No blocking API** -- async only
-- **No cookies, multipart, retry, or WebSocket** -- not yet implemented
+- **No cookies, multipart, or WebSocket** -- not yet implemented
 - **No custom DNS or TLS configuration** -- WinHTTP uses SChannel and
   the OS certificate store (`danger_accept_invalid_certs` *is* supported)
 - **No SOCKS proxies** -- WinHTTP only supports HTTP CONNECT

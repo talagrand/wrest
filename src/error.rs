@@ -124,6 +124,28 @@ impl Error {
         matches!(self.kind, ErrorKind::Upgrade)
     }
 
+    /// Returns `true` if the underlying I/O error is a connection reset.
+    ///
+    /// This is the WinHTTP equivalent of an HTTP/2 GOAWAY or
+    /// REFUSED_STREAM — the server closed the connection without
+    /// processing the request.  Used by the retry module to identify
+    /// safely-retryable failures.
+    ///
+    /// See also `io_error_from_winhttp()` for precise WinHTTP error code mappings to `io::ErrorKind`.
+    pub(crate) fn is_connection_reset(&self) -> bool {
+        use std::error::Error as _;
+        let mut cur: Option<&(dyn std::error::Error + 'static)> = self.source();
+        while let Some(e) = cur {
+            if let Some(io_err) = e.downcast_ref::<std::io::Error>()
+                && io_err.kind() == std::io::ErrorKind::ConnectionReset
+            {
+                return true;
+            }
+            cur = e.source();
+        }
+        false
+    }
+
     /// Returns the HTTP status code, if this error was produced by
     /// [`Response::error_for_status`](crate::Response::error_for_status).
     pub fn status(&self) -> Option<StatusCode> {

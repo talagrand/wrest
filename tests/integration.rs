@@ -1965,6 +1965,156 @@ async fn user_agent_sent_to_server() {
 }
 
 // -----------------------------------------------------------------------
+// Retry (data-driven)
+// -----------------------------------------------------------------------
+
+/// Data-driven retry policy variants.
+///
+/// Each row sets up mocks, builds a client with a different retry
+/// configuration, and asserts the expected final status.  The mock
+/// `expect()` counts verify the right number of requests were made.
+#[tokio::test]
+async fn retry_variants() {
+    // (label, setup_fn, builder_fn, expected_status)
+    //
+    // `setup_fn` mounts mocks on the server and returns nothing.
+    // `builder_fn` receives the mock server host and returns a
+    // configured `ClientBuilder`.
+    type SetupFn =
+        Box<dyn Fn(&MockServer) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>>>;
+    type BuilderFn = Box<dyn Fn(&str) -> wrest::ClientBuilder>;
+
+    /// Shared 503-retry classifier.
+    fn retry_503_for(host: String) -> wrest::retry::Builder {
+        wrest::retry::for_host(host).no_budget().classify_fn(|rr| {
+            if rr.status() == Some(StatusCode::SERVICE_UNAVAILABLE) {
+                rr.retryable()
+            } else {
+                rr.success()
+            }
+        })
+    }
+
+    let cases: Vec<(&str, SetupFn, BuilderFn, StatusCode)> = vec![
+        // 503 on first hit, 200 on retry → client sees 200.
+        (
+            "retry-503",
+            Box::new(|server| {
+                Box::pin(async {
+                    Mock::given(method("GET"))
+                        .and(path("/retry-503"))
+                        .respond_with(ResponseTemplate::new(503))
+                        .up_to_n_times(1)
+                        .mount(server)
+                        .await;
+                    Mock::given(method("GET"))
+                        .and(path("/retry-503"))
+                        .respond_with(ResponseTemplate::new(200).set_body_string("recovered"))
+                        .expect(1)
+                        .mount(server)
+                        .await;
+                })
+            }),
+            Box::new(|host: &str| {
+                Client::builder()
+                    .timeout(Duration::from_secs(10))
+                    .retry(retry_503_for(host.to_string()))
+            }),
+            StatusCode::OK,
+        ),
+        // Scoped to "other.com" — mock server is not matched, no retry.
+        // Note: It would seem reqwest (as of 0.13.2 at least) has a bug where it retries once even if out of scope.
+        // 1. `tower::retry::Retry` calls `clone_request` before the first request.
+        // 2. `reqwest::retry::Policy::clone_request` has `if self.retry_cnt > 0 && !self.scope.applies_to(req)`.
+        //    Since `retry_cnt` is 0, it ignores the scope and saves the request anyway.
+        // 3. When the request fails, `reqwest::retry::Policy::retry` checks the classifier but NOT the scope.
+        // 4. `tower` sends the saved request for a second attempt. Only then does `clone_request`
+        //    check the scope (since `retry_cnt` is 1) and return `None`.
+        // Working around this for now with the "expected_requests" count.
+        (
+            "out-of-scope",
+            Box::new(|server| {
+                Box::pin(async {
+                    let expected_requests = if cfg!(native_winhttp) { 1 } else { 2 };
+                    Mock::given(method("GET"))
+                        .and(path("/out-of-scope"))
+                        .respond_with(ResponseTemplate::new(503))
+                        .expect(expected_requests)
+                        .mount(server)
+                        .await;
+                })
+            }),
+            Box::new(|_host: &str| {
+                Client::builder()
+                    .timeout(Duration::from_secs(10))
+                    .retry(retry_503_for("other.com".to_string()))
+            }),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        // retry::never() — no retries at all, 503 returned directly.
+        (
+            "never",
+            Box::new(|server| {
+                Box::pin(async {
+                    Mock::given(method("GET"))
+                        .and(path("/never"))
+                        .respond_with(ResponseTemplate::new(503))
+                        .expect(1)
+                        .mount(server)
+                        .await;
+                })
+            }),
+            Box::new(|_host: &str| {
+                Client::builder()
+                    .timeout(Duration::from_secs(10))
+                    .retry(wrest::retry::never())
+            }),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        // max_retries_per_request(2): initial + 2 retries = 3 hits, all 503.
+        (
+            "max-retries",
+            Box::new(|server| {
+                Box::pin(async {
+                    Mock::given(method("GET"))
+                        .and(path("/max-retries"))
+                        .respond_with(ResponseTemplate::new(503))
+                        .expect(3)
+                        .mount(server)
+                        .await;
+                })
+            }),
+            Box::new(|host: &str| {
+                Client::builder()
+                    .timeout(Duration::from_secs(10))
+                    .retry(retry_503_for(host.to_string()).max_retries_per_request(2))
+            }),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ];
+
+    for (label, setup, builder_fn, expected) in &cases {
+        let server = MockServer::start().await;
+        setup(&server).await;
+
+        let base: wrest::Url = server.uri().parse().unwrap();
+        let host = base.host_str().unwrap();
+
+        let client = builder_fn(host)
+            .build()
+            .unwrap_or_else(|e| panic!("{label}: build failed: {e}"));
+
+        let resp = client
+            .get(format!("{}/{label}", server.uri()))
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("{label}: request failed: {e}"));
+
+        assert_eq!(resp.status(), *expected, "{label}");
+    }
+}
+
+// -----------------------------------------------------------------------
 // Manual / stress tests  (`cargo test -- --ignored`)
 // -----------------------------------------------------------------------
 //

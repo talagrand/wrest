@@ -153,9 +153,17 @@ impl Request {
         })
     }
 
-    /// Consume the request and return the body.
-    pub(crate) fn into_body(self) -> Option<crate::Body> {
-        self.body
+    /// Consume the request and return its parts.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        http::Method,
+        Url,
+        http::HeaderMap,
+        Option<crate::Body>,
+        Option<Duration>,
+    ) {
+        (self.method, self.url, self.headers, self.body, self.timeout)
     }
 }
 
