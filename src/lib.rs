@@ -115,6 +115,13 @@ pub use futures_core::Stream;
 /// A `Result` alias where the `Err` case is [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
 
+// ============================================================
+// Runtime -- executor abstraction
+// ============================================================
+
+mod runtime;
+pub use runtime::{Runtime, block_on, runtime};
+
 #[cfg(test)]
 mod tests {
     use super::*;

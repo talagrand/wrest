@@ -78,6 +78,25 @@ futures::executor::block_on(do_request());
 smol::block_on(do_request());
 ```
 
+wrest also ships a small `Runtime` abstraction that picks the minimal
+executor for the active backend. On the WinHTTP backend it delegates to
+`futures::executor::block_on`; with reqwest pass-through it wraps a
+single-threaded `tokio::Runtime`.
+
+```rust,ignore
+// One-shot -- creates a runtime, runs the future, returns the result.
+let body = wrest::block_on(async {
+    wrest::Client::builder().build()?.get("https://httpbin.org/get").send().await
+})?;
+
+// Reusable runtime -- amortises creation cost across multiple calls.
+let rt = wrest::runtime()?;
+let a = rt.block_on(request_a());
+let b = rt.block_on(request_b());
+```
+
+
+
 ## Cross-platform & A/B testing
 
 On **non-Windows** platforms (Linux, macOS, etc.) wrest is a thin

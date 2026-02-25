@@ -1,6 +1,6 @@
 [package]
 name = "wrest"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2024"
 rust-version = "1.90"
 description = "Async HTTP client for Windows backed by WinHTTP, with a reqwest-compatible API"
@@ -181,21 +181,18 @@ __all-native-features = [
 
 ## Forces the reqwest backend even on Windows.  Useful for A/B testing
 ## wrest's native WinHTTP backend against reqwest.
-always-reqwest   = ["dep:reqwest"]
+always-reqwest   = ["dep:reqwest", "dep:tokio"]
 
 [dependencies]
 futures-core = "0.3.31"
-futures-channel = "0.3.31"
-futures-util = "0.3.31"
-futures-timer = "3"
 serde = { version = "1.0.210", optional = true }
 serde_json = { version = "1.0.128", optional = true }
 form_urlencoded = { version = "1.2.2", optional = true }
-base64 = "0.22"
 tracing = { version = "0.1.40", default-features = false, features = ["std"], optional = true }
 http = "1.1"
 bytes = "1.11.1"
 reqwest = { version = "0.13", optional = true, default-features = false }
+tokio = { version = "1.44.2", optional = true, default-features = false, features = ["rt"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = ">=0.59, <0.62", default-features = false, features = [
@@ -204,17 +201,24 @@ windows-sys = { version = ">=0.59, <0.62", default-features = false, features = 
     "Win32_Networking_WinHttp",
     "Win32_System_LibraryLoader",
 ] }
+futures-channel = "0.3.31"
+futures-util = "0.3.31"
+futures-timer = "3"
+futures-executor = "0.3.31"
+base64 = "0.22"
 
 # On non-Windows platforms, reqwest is always used as the HTTP backend.
 [target.'cfg(not(windows))'.dependencies]
 reqwest = { version = "0.13", default-features = false }
+tokio = { version = "1.44.2", default-features = false, features = ["rt"] }
 
 [dev-dependencies]
-futures-executor = "0.3.31"
-futures-util = "0.3.31"
 tokio = { version = "1.44.2", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
 serde = { version = "1", features = ["derive"] }
+base64 = "0.22"
+futures-util = "0.3.31"
+futures-timer = "3"
 
 [[example]]
 name = "simple_get"
