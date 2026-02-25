@@ -93,6 +93,12 @@ pub use reqwest::{
     Body, Client, ClientBuilder, Error, IntoUrl, NoProxy, Proxy, Request, RequestBuilder, Response,
     Url, get, redirect, retry,
 };
+/// Errors from parsing a URL string.
+///
+/// reqwest re-exports `url::Url` as [`reqwest::Url`] but not its `ParseError`.
+/// This alias ensures `wrest::ParseError` resolves on both backends.
+#[cfg(not(native_winhttp))]
+pub type ParseError = <reqwest::Url as std::str::FromStr>::Err;
 
 /// Proxy configuration types.
 #[cfg(not(native_winhttp))]
@@ -110,9 +116,6 @@ pub use http::Version;
 /// Re-export the `http::header` module for header name constants.
 pub use http::header;
 pub use http::header::HeaderMap;
-
-pub use bytes::Bytes;
-pub use futures_core::Stream;
 
 /// A `Result` alias where the `Err` case is [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
