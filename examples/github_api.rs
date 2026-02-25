@@ -5,6 +5,7 @@
 //!
 //! Showcases:
 //! - `ClientBuilder::default_headers()` -- set `Accept` and `User-Agent`
+//! - `ClientBuilder::retry()` -- retry rate-limited (403) GET requests
 //! - `RequestBuilder::query()` -- add typed query parameters
 //! - `Response::headers()` -- read rate-limit and pagination headers
 //! - Typed JSON deserialization of real-world API responses
@@ -61,6 +62,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = wrest::Client::builder()
         .timeout(Duration::from_secs(30))
         .default_headers(default_headers)
+        // Retry rate-limited GET requests (403) -- GitHub's
+        // unauthenticated limit is 60 req/h, so a retry after a
+        // brief pause can succeed once the window rolls over.
+        .retry(
+            wrest::retry::for_host("api.github.com")
+                .max_retries_per_request(1)
+                .classify_fn(|rr| {
+                    if rr.method() == http::Method::GET
+                        && rr.status() == Some(http::StatusCode::FORBIDDEN)
+                    {
+                        return rr.retryable();
+                    }
+                    rr.success()
+                }),
+        )
         .build()?;
 
     // ---------------------------------------------------------------

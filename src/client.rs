@@ -52,6 +52,8 @@ pub(crate) struct ClientInner {
     pub default_headers: HeaderMap,
     /// Whether to ignore certificate errors.
     pub accept_invalid_certs: bool,
+    /// Retry policy for automatically retrying failed requests.
+    pub retry_policy: crate::retry::Policy,
 }
 
 /// Builder for configuring and constructing a [`Client`].
@@ -72,6 +74,7 @@ pub struct ClientBuilder {
     danger_accept_invalid_certs: bool,
     http1_only: bool,
     error: Option<Error>,
+    retry_policy: Option<crate::retry::Builder>,
 }
 
 impl Client {
@@ -141,43 +144,141 @@ impl Client {
         &self,
         request: crate::request::Request,
     ) -> Result<crate::Response, Error> {
-        let inner = &self.inner;
+        use crate::retry::Action;
 
-        // Convert HeaderMap to Vec<(String, String)> for WinHTTP.
-        // HTTP header values are octets (RFC 9110 §5.5).  WinHTTP accepts
+        let policy = &self.inner.retry_policy;
+        
+        // Ensure we always deposit a token when the execution finishes,
+        // regardless of which exit path is taken (success, error, or panic).
+        // The budget tracks throughput (requests we chose not to retry).
+        struct DepositGuard<'a> {
+            policy: &'a crate::retry::Policy,
+        }
+        impl<'a> Drop for DepositGuard<'a> {
+            fn drop(&mut self) {
+                self.policy.deposit();
+            }
+        }
+        let _guard = DepositGuard { policy };
+
+        let max = policy.max_retries();
+
+        // Decompose the request so we only clone the body on retries.
+        let (method, url, headers_map, mut body, timeout) = request.into_parts();
+        let method_str = method.as_str().to_owned();
+
+        // Convert HeaderMap to Vec<(String, String)> for WinHTTP once.
+        // HTTP header values are octets (RFC 9110 §5.5). WinHTTP accepts
         // UTF-16 strings, so we widen each byte to its Unicode code point
         // via Latin-1 identity mapping for a lossless round-trip.
-        let headers: Vec<(String, String)> = request
-            .headers()
+        let headers: Vec<(String, String)> = headers_map
             .iter()
             .map(|(name, value)| {
                 (name.as_str().to_owned(), crate::util::widen_latin1(value.as_bytes()))
             })
             .collect();
 
-        // Per-request timeout overrides client-level timeout
-        let effective_timeout = request.timeout().copied().or(inner.total_timeout);
-        let deadline = effective_timeout.map(|d| std::time::Instant::now() + d);
+        // Calculate the absolute deadline for the entire request lifecycle (including retries).
+        let effective_timeout = timeout.or(self.inner.total_timeout);
+        let deadline = effective_timeout.and_then(|d| std::time::Instant::now().checked_add(d));
 
-        let url = request.url().clone();
-        let method_str = request.method().as_str().to_owned();
+        // Fast path: if retries are disabled, skip cloning entirely.
+        if max == 0 {
+            let result = self
+                .execute_inner(&url, &method_str, &headers, body, deadline)
+                .await;
+            return result;
+        }
+
+        // We know max >= 1.
+        // Total attempts = 1 (initial) + up to `max` retries.
+        let mut remaining_retries = max;
+
+        loop {
+            // Try to clone the body. If we can't (e.g. streaming body),
+            // or if we're out of retries, we consume the original body
+            // and this becomes the final attempt.
+            // Note: For in-memory bodies, `try_clone()` is very cheap — it's
+            // just a reference count bump via the `bytes` crate.
+            let (body_to_send, can_retry) = if remaining_retries > 0 {
+                match &body {
+                    Some(b) => {
+                        if let Some(cloned) = b.try_clone() {
+                            (Some(cloned), true)
+                        } else {
+                            (body.take(), false)
+                        }
+                    }
+                    None => (None, true),
+                }
+            } else {
+                (body.take(), false)
+            };
+
+            let result = self
+                .execute_inner(&url, &method_str, &headers, body_to_send, deadline)
+                .await;
+
+            if !can_retry {
+                return result;
+            }
+
+            let action = policy.classify_result(&url, &method, &result);
+
+            if let Action::Retryable = action
+                && policy.can_withdraw()
+            {
+                remaining_retries -= 1;
+                trace!(
+                    attempt = max - remaining_retries + 1,
+                    url = %url,
+                    "retrying request"
+                );
+                continue;
+            }
+
+            // Terminal: return (success, non-retryable, or exhausted budget).
+            return result;
+        }
+    }
+
+    /// Inner execution — a single request attempt (no retry logic).
+    async fn execute_inner(
+        &self,
+        url: &crate::Url,
+        method_str: &str,
+        headers: &[(String, String)],
+        body: Option<crate::Body>,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<crate::Response, Error> {
+        let inner = &self.inner;
+
+        // Calculate remaining time for this attempt
+        let remaining_timeout =
+            deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()));
+
+        // If the deadline has already passed, fail immediately
+        if let Some(rem) = remaining_timeout
+            && rem.is_zero()
+        {
+            return Err(Error::timeout("total request timeout elapsed").with_url(url.clone()));
+        }
 
         trace!(
             method = method_str,
             url = %url,
-            timeout_ms = effective_timeout.map(|d| d.as_millis() as u64),
+            timeout_ms = remaining_timeout.map(|d| d.as_millis() as u64),
             "Client::execute",
         );
 
         // Execute request -- body is passed through to the WinHTTP layer
         // which handles in-memory bytes and streaming bodies differently.
-        let body = request.into_body();
         let send_future = async {
             winhttp::execute_request(
                 &inner.session,
-                &url,
-                &method_str,
-                &headers,
+                url,
+                method_str,
+                headers,
                 body,
                 &inner.proxy_config,
                 inner.accept_invalid_certs,
@@ -186,7 +287,7 @@ impl Client {
         };
 
         // Race against total timeout if configured
-        let raw = if let Some(timeout) = effective_timeout {
+        let raw = if let Some(timeout) = remaining_timeout {
             let delay = futures_timer::Delay::new(timeout);
             let send_future = std::pin::pin!(send_future);
             let delay = std::pin::pin!(delay);
@@ -244,6 +345,7 @@ impl ClientBuilder {
             danger_accept_invalid_certs: false,
             http1_only: false,
             error: None,
+            retry_policy: None,
         }
     }
 
@@ -818,6 +920,17 @@ impl ClientBuilder {
         self
     }
 
+    /// Set a retry policy for the client.
+    ///
+    /// By default the client retries connection-reset errors (the
+    /// WinHTTP equivalent of HTTP/2 GOAWAY / REFUSED\_STREAM).  Use
+    /// [`retry::never()`](crate::retry::never) to disable this.
+    #[must_use]
+    pub fn retry(mut self, policy: crate::retry::Builder) -> Self {
+        self.retry_policy = Some(policy);
+        self
+    }
+
     /// Build the [`Client`].
     ///
     /// This opens a WinHTTP session, installs the async callback, and
@@ -897,6 +1010,10 @@ impl ClientBuilder {
                 proxy_config,
                 default_headers: self.default_headers,
                 accept_invalid_certs: self.danger_accept_invalid_certs,
+                retry_policy: self
+                    .retry_policy
+                    .unwrap_or_else(crate::retry::Builder::default)
+                    .into_policy(),
             }),
         })
     }

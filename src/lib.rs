@@ -5,7 +5,7 @@
 // The native backend exposes `pub` types that impl non-pub traits (e.g.
 // `proxy::ProxyAction`).  This lint does not apply when reqwest provides
 // the public surface.
-#![cfg_attr(native_winhttp, allow(private_interfaces))]
+#![cfg_attr(native_winhttp, allow(private_interfaces, private_bounds))]
 
 // ============================================================
 // Native WinHTTP backend (Windows, unless `always-reqwest`)
@@ -41,6 +41,8 @@ pub mod redirect;
 mod request;
 #[cfg(native_winhttp)]
 mod response;
+#[cfg(native_winhttp)]
+pub mod retry;
 #[cfg(native_winhttp)]
 pub(crate) mod url;
 #[cfg(native_winhttp)]
@@ -89,7 +91,7 @@ pub async fn get<U: IntoUrl>(url: U) -> crate::Result<Response> {
 #[cfg(not(native_winhttp))]
 pub use reqwest::{
     Body, Client, ClientBuilder, Error, IntoUrl, NoProxy, Proxy, Request, RequestBuilder, Response,
-    Url, get, redirect,
+    Url, get, redirect, retry,
 };
 
 /// Proxy configuration types.

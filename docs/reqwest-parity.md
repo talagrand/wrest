@@ -49,7 +49,7 @@ Each row is a single public API item. Status meanings:
 | `dns` | ✓ | — | 🔒 | WinHTTP manages DNS |
 | `multipart` | ✓ | — | 💤 | not implemented |
 | `tls` | ✓ | — | 🔒 | WinHTTP always uses SChannel |
-| `retry` | ✓ | — | 💤 | new in 0.13, not implemented |
+| `retry` | ✓ | ✓ | ✅ | |
 
 ## Traits & Impls
 
@@ -211,7 +211,7 @@ Each row is a single public API item. Status meanings:
 |--------|---------|-------|--------|-------|
 | `https_only()` | ✓ | — | 💤 | not implemented |
 | `connector_layer()` | ✓ | — | 🔒 | Tower connector layers not applicable |
-| `retry()` | ✓ | — | 💤 | new in 0.13, not implemented |
+| `retry()` | ✓ | ✓ | ✅ | |
 
 ---
 
@@ -433,7 +433,7 @@ are feasible future work unless noted otherwise.
 | Method | reqwest | wrest | Status | Notes |
 |--------|---------|-------|--------|-------|
 | `from_string()` | ✓ | ✓ | ✅ | |
-| `from_env()` | ✓ | — | 💤 | not implemented |
+| `from_env()` | ✓ | ✓ | ✅ | |
 
 ---
 
@@ -480,15 +480,43 @@ are feasible future work unless noted otherwise.
 | `Form` | 💤 | not implemented |
 | `Part` | 💤 | " |
 
-## `retry` Module Types (reqwest 0.13 only)
+## `retry` Module
 
-| Type | Status | Notes |
-|------|--------|-------|
-| `Builder` — `for_host()`, `scoped()`, `no_budget()`, `max_extra_load()`, `max_retries_per_request()`, `classify()`, `classify_fn()` | 💤 | not implemented |
-| `classify::Classify` trait | 💤 | " |
-| `classify::ReqRep` | 💤 | " |
-| `classify::Action` (`Success`, `Retryable`) | 💤 | " |
-| `scope::Scope` trait | 💤 | " |
+### Free Functions
+
+| Function | reqwest | wrest | Status | Notes |
+|----------|---------|-------|--------|-------|
+| `for_host()` | ✓ | ✓ | ✅ | |
+| `never()` | ✓ | ✓ | ✅ | |
+
+### `Builder` Methods
+
+| Method | reqwest | wrest | Status | Notes |
+|--------|---------|-------|--------|-------|
+| `scoped()` | ✓ (`impl Scope`) | ✓ (closure) | ✅ | both sealed — external callers use `for_host()` |
+| `no_budget()` | ✓ | ✓ | ✅ | |
+| `max_extra_load()` | ✓ | ✓ | ✅ | |
+| `max_retries_per_request()` | ✓ | ✓ | ✅ | |
+| `classify_fn()` | ✓ | ✓ | ✅ | |
+| `classify()` | ✓ (`impl Classify`) | — | N/A | reqwest’s `Classify` trait is sealed (private module) — external callers cannot implement it; `classify_fn()` is the usable equivalent |
+
+### `ReqRep` Methods (received by `classify_fn` closures)
+
+| Method | reqwest | wrest | Status | Notes |
+|--------|---------|-------|--------|-------|
+| `method()` | ✓ | ✓ | ✅ | |
+| `uri()` | ✓ (`&http::Uri`) | ✓ (`&http::Uri`) | ✅ | |
+| `status()` | ✓ | ✓ | ✅ | |
+| `error()` | ✓ | ✓ | ✅ | |
+| `retryable()` | ✓ | ✓ | ✅ | |
+| `success()` | ✓ | ✓ | ✅ | |
+
+### `Action` Enum (returned from `classify_fn` closures)
+
+| Variant | reqwest | wrest | Status | Notes |
+|---------|---------|-------|--------|-------|
+| `Success` | ✓ | ✓ | ✅ | |
+| `Retryable` | ✓ | ✓ | ✅ | |
 
 ---
 
@@ -496,8 +524,8 @@ are feasible future work unless noted otherwise.
 
 | Status | Count |
 |--------|-------|
-| ✅ Implemented | ~76 |
-| 🔇 No-op (`noop-compat`) | ~31 |
-| 🔒 Cannot implement (WinHTTP limitation) | ~15 |
-| 💤 Not yet implemented | ~35 |
-| N/A | ~2 |
+| ✅ Implemented | 159 |
+| 🔇 No-op (`noop-compat`) | 31 |
+| 🔒 Cannot implement (WinHTTP limitation) | 38 |
+| 💤 Not yet implemented | 48 |
+| N/A | 3 |
