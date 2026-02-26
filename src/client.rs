@@ -147,7 +147,7 @@ impl Client {
         use crate::retry::Action;
 
         let policy = &self.inner.retry_policy;
-        
+
         // Ensure we always deposit a token when the execution finishes,
         // regardless of which exit path is taken (success, error, or panic).
         // The budget tracks throughput (requests we chose not to retry).
