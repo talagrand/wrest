@@ -82,10 +82,10 @@ pub async fn get<U: IntoUrl>(url: U) -> crate::Result<Response> {
 }
 
 // ============================================================
-// reqwest backend (non-Windows, or `always-reqwest` on Windows)
+// reqwest pass-through
 //
-// When the native backend is inactive, every public type is a
-// straight re-export from reqwest.  No wrapper types, no shims.
+// When the native WinHTTP backend is inactive, every public
+// type is a simple pass-through to `reqwest`.
 // ============================================================
 
 #[cfg(not(native_winhttp))]
@@ -96,7 +96,8 @@ pub use reqwest::{
 /// Errors from parsing a URL string.
 ///
 /// reqwest re-exports `url::Url` as [`reqwest::Url`] but not its `ParseError`.
-/// This alias ensures `wrest::ParseError` resolves on both backends.
+/// This alias ensures `wrest::ParseError` resolves on both the native backend and
+/// the reqwest passthrough.
 #[cfg(not(native_winhttp))]
 pub type ParseError = <reqwest::Url as std::str::FromStr>::Err;
 
@@ -107,7 +108,7 @@ pub mod proxy {
 }
 
 // ============================================================
-// Common re-exports (identical types regardless of backend)
+// Common re-exports (identical on native backend and reqwest passthrough)
 // ============================================================
 
 pub use http::Method;
@@ -270,7 +271,7 @@ mod tests {
 
     /// Smoke test for Debug / Display on native-only internal types
     /// (`SignalCancelled`, `Error::builder()`) that don't exist when
-    /// the reqwest backend is active.
+    /// the reqwest passthrough is active.
     #[test]
     #[cfg(native_winhttp)]
     fn fmt_traits_smoke_native_only() {
@@ -285,7 +286,7 @@ mod tests {
 
         // -- Error (Display + Debug) --
         // Error::builder() is a wrest-internal constructor, not available
-        // on the reqwest backend where Error = reqwest::Error.
+        // on the reqwest passthrough where Error = reqwest::Error.
         let err = Error::builder("test");
         let s = format!("{err}");
         assert!(!s.is_empty(), "Error display: {s}");

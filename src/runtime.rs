@@ -3,8 +3,8 @@
 /// A lightweight executor handle.
 ///
 /// On the native backend this is a zero-sized wrapper around
-/// [`futures::executor::block_on`]; on the reqwest backend it is
-/// [`tokio::runtime::Runtime`]. Use [`runtime()`] to construct one.
+/// `futures::executor::block_on`; on the reqwest passthrough it wraps a
+/// tokio runtime. Use [`runtime()`] to construct one.
 #[cfg(native_winhttp)]
 #[derive(Debug)]
 pub struct Runtime;
@@ -17,7 +17,7 @@ impl Runtime {
     }
 }
 
-/// On the reqwest backend, `Runtime` is [`tokio::runtime::Runtime`] directly.
+/// On the reqwest passthrough, `Runtime` is `tokio::runtime::Runtime` directly.
 #[cfg(not(native_winhttp))]
 pub type Runtime = tokio::runtime::Runtime;
 
@@ -27,7 +27,7 @@ pub fn runtime() -> std::io::Result<Runtime> {
     Ok(Runtime)
 }
 
-/// Create a new [`Runtime`] (reqwest backend -- wraps a single-threaded tokio runtime).
+/// Create a new [`Runtime`] (reqwest passthrough -- wraps a single-threaded tokio runtime).
 ///
 /// # Errors
 ///
@@ -44,7 +44,7 @@ pub fn runtime() -> std::io::Result<Runtime> {
 /// # Errors
 ///
 /// Returns [`std::io::Error`] if the runtime cannot be created
-/// (reqwest backend only).
+/// (reqwest passthrough only).
 pub fn block_on<F: std::future::Future<Output = T>, T>(f: F) -> std::io::Result<T> {
     let rt = runtime()?;
     Ok(rt.block_on(f))
