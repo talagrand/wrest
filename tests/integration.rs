@@ -2071,6 +2071,26 @@ async fn retry_variants() {
             }),
             StatusCode::SERVICE_UNAVAILABLE,
         ),
+        // max_retries_per_request(0): fast-path, no retries at all.
+        (
+            "max-retries-zero",
+            Box::new(|server| {
+                Box::pin(async {
+                    Mock::given(method("GET"))
+                        .and(path("/max-retries-zero"))
+                        .respond_with(ResponseTemplate::new(503))
+                        .expect(1)
+                        .mount(server)
+                        .await;
+                })
+            }),
+            Box::new(|host: &str| {
+                Client::builder()
+                    .timeout(Duration::from_secs(10))
+                    .retry(retry_503_for(host.to_string()).max_retries_per_request(0))
+            }),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
         // max_retries_per_request(2): initial + 2 retries = 3 hits, all 503.
         (
             "max-retries",

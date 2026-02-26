@@ -156,13 +156,7 @@ impl Request {
     /// Consume the request and return its parts.
     pub(crate) fn into_parts(
         self,
-    ) -> (
-        http::Method,
-        Url,
-        http::HeaderMap,
-        Option<crate::Body>,
-        Option<Duration>,
-    ) {
+    ) -> (http::Method, Url, http::HeaderMap, Option<crate::Body>, Option<Duration>) {
         (self.method, self.url, self.headers, self.body, self.timeout)
     }
 }

@@ -73,7 +73,12 @@ fn sink_subscriber_covers_all_methods() {
     let _guard = ::tracing::subscriber::set_default(SinkSubscriber);
     // event → enabled + event
     ::tracing::trace!("cover event path");
-    // span  → new_span + enter + exit + record + record_follows_from
-    let span = ::tracing::trace_span!("cover_span", x = 1);
+    // span  → new_span + enter + exit
+    let span = ::tracing::trace_span!("cover_span", x = ::tracing::field::Empty);
     let _entered = span.enter();
+    // record → updates a field on the span
+    span.record("x", 42);
+    // record_follows_from → links two spans causally
+    let other = ::tracing::trace_span!("other_span");
+    span.follows_from(other.id());
 }

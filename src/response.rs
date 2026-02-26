@@ -424,6 +424,23 @@ impl Response {
         }
         Ok(buf.freeze())
     }
+
+    /// Build a synthetic `Response` for unit tests.
+    /// Uses a real `Client` (requiring WinHTTP) but no server I/O.
+    #[cfg(test)]
+    pub(crate) fn synthetic(status: StatusCode, url: &str) -> Response {
+        let client = Client::builder().build().expect("client");
+        Response {
+            status,
+            version: Version::HTTP_11,
+            url: url.parse().unwrap(),
+            headers: HeaderMap::new(),
+            extensions: Extensions::default(),
+            raw: None,
+            deadline: None,
+            _client: client,
+        }
+    }
 }
 
 /// Metadata extracted from a [`Response`] by [`Response::into_parts`].
@@ -460,11 +477,10 @@ mod tests {
     /// Uses a real `Client` (requiring WinHTTP) but no server I/O.
     fn synthetic(status: StatusCode, headers: HeaderMap) -> Response {
         let client = Client::builder().build().expect("client");
-        let url: Url = "https://test.example.com/path".parse().unwrap();
         Response {
             status,
             version: Version::HTTP_11,
-            url,
+            url: "https://test.example.com/path".parse().unwrap(),
             headers,
             extensions: Extensions::default(),
             raw: None,

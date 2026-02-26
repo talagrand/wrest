@@ -634,6 +634,11 @@ mod tests {
         // Default policy (protocol NACKs only, unscoped).
         let policy_default = Builder::default().into_policy();
 
+        // Policy with a matching scope but no classify function.
+        let policy_no_classify = for_host("example.com".to_string())
+            .no_budget()
+            .into_policy();
+
         type RequestResult = Result<crate::Response, crate::Error>;
 
         let err: RequestResult = Err(crate::Error::builder("test"));
@@ -643,8 +648,20 @@ mod tests {
         let conn_reset_err: RequestResult = Err(crate::Error::request("connection reset")
             .with_source(std::io::Error::from(std::io::ErrorKind::ConnectionReset)));
 
+        let resp_503: RequestResult = Ok(crate::Response::synthetic(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "https://example.com/api",
+        ));
+
         // (policy, url, result, expected_action, desc)
         let cases: &[(&Policy, &str, &RequestResult, Action, &str)] = &[
+            (
+                &policy_503,
+                "https://example.com/api",
+                &resp_503,
+                Action::Retryable,
+                "503-policy: 503 response IS retryable",
+            ),
             (
                 &policy_503,
                 "https://example.com/api",
@@ -673,6 +690,13 @@ mod tests {
                 &conn_reset_err,
                 Action::Retryable,
                 "default: connection reset IS retryable",
+            ),
+            (
+                &policy_no_classify,
+                "https://example.com/",
+                &err,
+                Action::Success,
+                "no-classify: scope matches but no classify fn → success",
             ),
         ];
 
