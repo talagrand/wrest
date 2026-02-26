@@ -41,6 +41,8 @@ jobs:
         Write-Output "Version check passed: $cargoVersion"
 
     - name: Create Release
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: gh release create ${{ steps.tag_name.outputs.TAG_NAME }} --title "Release ${{ steps.tag_name.outputs.TAG_NAME }}" --generate-notes
 
   publish-crate:
