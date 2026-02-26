@@ -2,12 +2,12 @@
 #
 # `cargo xt`  -- test with all user-facing features (native WinHTTP backend)
 # `cargo xc`  -- clippy with all user-facing features
-# `cargo xtr` -- test with the reqwest backend (always-reqwest)
-# `cargo xcr` -- clippy with the reqwest backend
+# `cargo xtr` -- test with the reqwest passthrough (always-reqwest)
+# `cargo xcr` -- clippy with the reqwest passthrough
 # `cargo xcov` -- line-coverage with all native features (requires cargo-llvm-cov)
 #
 # Prefer these over `--all-features`, which silently activates
-# `always-reqwest` and switches to the reqwest backend.
+# `always-reqwest` and switches to the reqwest passthrough.
 
 [alias]
 xt   = "test     --all-targets --features __all-native-features"

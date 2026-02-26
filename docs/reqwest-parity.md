@@ -29,6 +29,7 @@ Each row is a single public API item. Status meanings:
 | `Version` (http) | ✓ | ✓ | ✅ | |
 | `HeaderMap` / `header` module | ✓ | ✓ | ✅ | |
 | `IntoUrl` trait | ✓ | ✓ | ✅ | |
+| `ParseError` | — | ✓ | ✅ | reqwest does not re-export `url::ParseError`; wrest provides it on the native backend and the reqwest passthrough so `wrest::ParseError` always works |
 | `Proxy` | ✓ | ✓ | ✅ | |
 | `NoProxy` | ✓ | ✓ | ✅ | |
 | `get()` free function | ✓ | ✓ | ✅ | |
@@ -65,6 +66,8 @@ Each row is a single public API item. Status meanings:
 | `impl http_body::Body for Body` | ✓ | — | 🔒 | wrest uses WinHTTP streaming, not `http-body` trait |
 | `impl ResponseBuilderExt for http::response::Builder` | ✓ | — | 💤 | |
 | `impl IntoProxy for S: IntoUrl` | ✓ | — | 💤 | Proxy config is simpler in wrest |
+| `UnixSocketProvider` trait | ✓ | — | 🔒 | `#[cfg(unix)]` in reqwest; Windows has AF_UNIX since 1803 but WinHTTP does not expose it |
+| `WindowsNamedPipeProvider` trait | ✓ | — | 🔒 | Windows named pipes; not exposed via WinHTTP |
 
 ---
 
@@ -425,7 +428,9 @@ are feasible future work unless noted otherwise.
 | `https()` | ✓ | ✓ | ✅ | |
 | `basic_auth()` | ✓ | ✓ | ✅ | |
 | `no_proxy()` | ✓ | — | 🔇 | no-op under `noop-compat` |
+| `custom()` | ✓ | — | 💤 | per-URL proxy selection via closure |
 | `custom_http_auth()` | ✓ | — | 💤 | not implemented |
+| `headers()` | ✓ | — | 💤 | custom headers on proxy requests |
 | SOCKS5 proxy (`socks5://`) | ✓ | — | 🔒 | WinHTTP only supports HTTP CONNECT proxies |
 
 ## `NoProxy` Methods
@@ -526,6 +531,6 @@ are feasible future work unless noted otherwise.
 |--------|-------|
 | ✅ Implemented | 159 |
 | 🔇 No-op (`noop-compat`) | 31 |
-| 🔒 Cannot implement (WinHTTP limitation) | 38 |
+| 🔒 Cannot implement (WinHTTP limitation) | 39 |
 | 💤 Not yet implemented | 48 |
 | N/A | 3 |

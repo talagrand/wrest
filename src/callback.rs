@@ -3,7 +3,7 @@
 //! This module provides three primitives that turn any Win32 callback-based API
 //! into idiomatic Rust `Future`s:
 //!
-//! - [`CallbackContext`] -- safe `Arc` <-> `usize` lifecycle for `DWORD_PTR` context values
+//! - `CallbackContext` -- safe `Arc` <-> `usize` lifecycle for `DWORD_PTR` context values
 //! - [`CompletionSignal<T>`] -- reusable one-shot channel bridging callback to future
 //! - [`await_win32()`] -- async combinator: install listener -> call Win32 -> await callback
 //!

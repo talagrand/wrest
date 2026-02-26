@@ -23,9 +23,9 @@ jobs:
           - { name: 'win / msrv / defaults',       os: windows-latest, rust: msrv,   mode: defaults }
           - { name: 'win / stable / no-defaults',  os: windows-latest, rust: stable, mode: no-defaults }
           - { name: 'win / stable / all-native',   os: windows-latest, rust: stable, mode: all, doc-tests: true }
-          # -- Windows - reqwest backend (via always-reqwest) ---------
+          # -- Windows - reqwest passthrough (via always-reqwest) -----
           - { name: 'win / stable / reqwest',      os: windows-latest, rust: stable, mode: all-reqwest }
-          # -- Linux - reqwest backend (implicit, no always-reqwest needed)
+          # -- Linux - reqwest passthrough (implicit, no always-reqwest needed)
           - { name: 'linux / msrv / no-defaults',  os: ubuntu-latest,  rust: msrv,   mode: no-defaults }
           - { name: 'linux / msrv / defaults',      os: ubuntu-latest,  rust: msrv,   mode: defaults }
           - { name: 'linux / stable / no-defaults', os: ubuntu-latest,  rust: stable, mode: no-defaults }

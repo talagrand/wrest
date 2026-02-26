@@ -139,7 +139,7 @@ impl Proxy {
     /// Set proxy credentials using HTTP Basic authentication.
     ///
     /// The credentials are passed to WinHTTP via
-    /// [`WinHttpSetCredentials`](https://learn.microsoft.com/en-us/windows/win32/api/winhttp/nf-winhttp-winhttpsettcredentials)
+    /// [`WinHttpSetCredentials`](https://learn.microsoft.com/en-us/windows/win32/api/winhttp/nf-winhttp-winhttpsetcredentials)
     /// on each request that uses this proxy.
     ///
     /// Matches [`reqwest::Proxy::basic_auth()`](https://docs.rs/reqwest/latest/reqwest/struct.Proxy.html#method.basic_auth).

@@ -47,27 +47,27 @@ default = ["default-tls", "charset", "http2", "system-proxy"]
 ## wrest natively supports all 39 WHATWG encodings via Win32
 ## `MultiByteToWideChar` (plus ICU and a lookup table for edge cases),
 ## so this feature is a no-op on the native backend.  On the reqwest
-## backend it forwards to `reqwest/charset`.
+## passthrough it forwards to `reqwest/charset`.
 charset     = ["reqwest?/charset"]
 
 ## Enables HTTP/2 support.
 ##
 ## WinHTTP negotiates HTTP/2 via ALPN automatically (Windows 10 1607+),
 ## so this feature is a no-op on the native backend.  On the reqwest
-## backend it forwards to `reqwest/http2`.
+## passthrough it forwards to `reqwest/http2`.
 http2       = ["reqwest?/http2"]
 
 ## Provides TLS support to connect over HTTPS.
 ##
 ## WinHTTP always uses the OS TLS stack (SChannel), so this feature
-## is a no-op on the native backend.  On the reqwest backend it
+## is a no-op on the native backend.  On the reqwest passthrough it
 ## forwards to `reqwest/default-tls`.
 default-tls = ["reqwest?/default-tls"]
 
 ## Use the OS-native TLS stack (SChannel on Windows).
 ##
 ## This is always the case for wrest's native backend, so the feature
-## just makes the default explicit.  On the reqwest backend it
+## just makes the default explicit.  On the reqwest passthrough it
 ## forwards to `reqwest/native-tls`.
 native-tls  = ["reqwest?/native-tls"]
 
@@ -75,11 +75,11 @@ native-tls  = ["reqwest?/native-tls"]
 ##
 ## WinHTTP uses `WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` (WPAD/PAC +
 ## system settings) by default, so this feature is a no-op on the
-## native backend.  On the reqwest backend it forwards to
+## native backend.  On the reqwest passthrough it forwards to
 ## `reqwest/system-proxy`.
 system-proxy = ["reqwest?/system-proxy"]
 
-# -- Serialization features (real implementation on both backends) ---
+# -- Serialization features (real implementation on native backend and reqwest passthrough) --
 
 ## Enables `RequestBuilder::json()` and `Response::json()`.
 json  = ["dep:serde", "dep:serde_json",                    "reqwest?/json"]
@@ -96,7 +96,7 @@ query = ["dep:serde", "dep:serde_json", "dep:form_urlencoded", "reqwest?/query"]
 ##
 ## WinHTTP always decompresses gzip automatically, so the builder
 ## method is a no-op on the native backend (requires `noop-compat`
-## to expose).  On the reqwest backend this forwards to
+## to expose).  On the reqwest passthrough this forwards to
 ## `reqwest/gzip`.
 gzip    = ["reqwest?/gzip"]
 
@@ -104,7 +104,7 @@ gzip    = ["reqwest?/gzip"]
 ##
 ## WinHTTP always decompresses deflate automatically, so the builder
 ## method is a no-op on the native backend (requires `noop-compat`
-## to expose).  On the reqwest backend this forwards to
+## to expose).  On the reqwest passthrough this forwards to
 ## `reqwest/deflate`.
 deflate = ["reqwest?/deflate"]
 
@@ -112,7 +112,7 @@ deflate = ["reqwest?/deflate"]
 ##
 ## WinHTTP does not decompress brotli natively, so the builder method
 ## is a no-op on the native backend (requires `noop-compat` to
-## expose).  On the reqwest backend this forwards to
+## expose).  On the reqwest passthrough this forwards to
 ## `reqwest/brotli`.
 brotli  = ["reqwest?/brotli"]
 
@@ -120,7 +120,7 @@ brotli  = ["reqwest?/brotli"]
 ##
 ## WinHTTP does not decompress zstd natively, so the builder method
 ## is a no-op on the native backend (requires `noop-compat` to
-## expose).  On the reqwest backend this forwards to
+## expose).  On the reqwest passthrough this forwards to
 ## `reqwest/zstd`.
 zstd    = ["reqwest?/zstd"]
 
@@ -129,7 +129,7 @@ zstd    = ["reqwest?/zstd"]
 ## Enables `Stream`-based request/response body support.
 ##
 ## wrest always supports streaming internally, so this feature is a
-## no-op on the native backend.  On the reqwest backend it forwards
+## no-op on the native backend.  On the reqwest passthrough it forwards
 ## to `reqwest/stream`.
 stream  = ["reqwest?/stream"]
 
@@ -178,7 +178,7 @@ __all-native-features = [
 
 # -- Backend selection ----------------------------------------------
 
-## Forces the reqwest backend even on Windows.  Useful for A/B testing
+## Forces the reqwest passthrough even on Windows.  Useful for A/B testing
 ## wrest's native WinHTTP backend against reqwest.
 always-reqwest   = ["dep:reqwest", "dep:tokio"]
 
@@ -206,7 +206,7 @@ futures-timer = "3"
 futures-executor = "0.3.31"
 base64 = "0.22"
 
-# On non-Windows platforms, reqwest is always used as the HTTP backend.
+# On non-Windows platforms, reqwest is used as the HTTP passthrough.
 [target.'cfg(not(windows))'.dependencies]
 reqwest = { version = "0.13", default-features = false }
 tokio = { version = "1.44.2", default-features = false, features = ["rt"] }

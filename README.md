@@ -79,9 +79,9 @@ smol::block_on(do_request());
 ```
 
 wrest also ships a small `Runtime` abstraction that picks the minimal
-executor for the active backend. On the WinHTTP backend it delegates to
-`futures::executor::block_on`; with reqwest pass-through it wraps a
-single-threaded `tokio::Runtime`.
+executor for the native backend and the reqwest passthrough. On the
+native backend it delegates to `futures::executor::block_on`; with reqwest
+pass-through it wraps a single-threaded `tokio::Runtime`.
 
 ```rust,ignore
 // One-shot -- creates a runtime, runs the future, returns the result.

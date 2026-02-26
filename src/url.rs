@@ -390,7 +390,7 @@ impl std::fmt::Display for Url {
 
 impl std::fmt::Debug for Url {
     /// Matches `url::Url`'s derived Debug format so that diagnostic output is
-    /// identical regardless of whether the native or reqwest backend is active.
+    /// identical regardless of whether the native backend or reqwest passthrough is active.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // url::Url shows host as `Some(Domain("..."))` for http/https.
         struct HostDebug<'a>(&'a str);
@@ -693,6 +693,12 @@ impl Url {
     /// Convert this `Url` into an [`http::Uri`] from parts (no string roundtrip).
     ///
     /// Fragments are dropped because `http::Uri` does not carry them.
+    ///
+    /// In practice this conversion cannot fail: the scheme, authority, and
+    /// path-and-query components were already validated by WinHTTP during
+    /// `Url` construction, so they always satisfy `http::Uri`'s requirements.
+    /// The `Result` exists only because the `http::Uri` builder API is
+    /// generically fallible.
     pub(crate) fn to_http_uri(&self) -> Result<http::Uri, http::Error> {
         let authority = if self.explicit_port {
             format!("{}:{}", self.host, self.port)
