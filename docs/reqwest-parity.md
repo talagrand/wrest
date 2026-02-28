@@ -33,7 +33,7 @@ Each row is a single public API item. Status meanings:
 | `Proxy` | ✓ | ✓ | ✅ | |
 | `NoProxy` | ✓ | ✓ | ✅ | |
 | `get()` free function | ✓ | ✓ | ✅ | |
-| `Upgraded` | ✓ | — | 💤 | HTTP upgrades not implemented |
+| `Upgraded` | ✓ | — | 💤 | |
 | `ResponseBuilderExt` trait | ✓ | — | 💤 | |
 | `Certificate` | ✓ | — | 🔒 | WinHTTP uses OS cert store |
 | `Identity` | ✓ | — | 🔒 | WinHTTP uses OS cert store |
@@ -46,9 +46,9 @@ Each row is a single public API item. Status meanings:
 | `proxy` | ✓ | ✓ | ✅ | |
 | `header` | ✓ | ✓ | ✅ | re-export of `http::header` |
 | `blocking` | ✓ | — | 💤 | async only |
-| `cookie` | ✓ | — | 💤 | not implemented |
+| `cookie` | ✓ | — | 💤 | |
 | `dns` | ✓ | — | 🔒 | WinHTTP manages DNS |
-| `multipart` | ✓ | — | 💤 | not implemented |
+| `multipart` | ✓ | — | 💤 | |
 | `tls` | ✓ | — | 🔒 | WinHTTP always uses SChannel |
 | `retry` | ✓ | ✓ | ✅ | |
 
@@ -59,13 +59,13 @@ Each row is a single public API item. Status meanings:
 | `impl Service<Request> for Client` | ✓ | — | 💤 | Tower integration |
 | `impl Service<Request> for &Client` | ✓ | — | 💤 | Tower integration |
 | `impl From<Response> for Body` | ✓ | ✓ | ✅ | |
-| `impl From<http::Response<T>> for Response` | ✓ | — | � | Requires plumbing a pre-built body through `chunk()` |
+| `impl From<http::Response<T>> for Response` | ✓ | — | 💤 | Requires plumbing a pre-built body through `chunk()` |
 | `impl From<Response> for http::Response<Body>` | ✓ | ✓ | ✅ | |
 | `impl TryFrom<http::Request<T>> for Request` | ✓ | ✓ | ✅ | |
 | `impl TryFrom<Request> for http::Request<Body>` | ✓ | ✓ | ✅ | |
 | `impl http_body::Body for Body` | ✓ | — | 🔒 | wrest uses WinHTTP streaming, not `http-body` trait |
 | `impl ResponseBuilderExt for http::response::Builder` | ✓ | — | 💤 | |
-| `impl IntoProxy for S: IntoUrl` | ✓ | — | 💤 | Proxy config is simpler in wrest |
+| `impl IntoProxy for S: IntoUrl` | ✓ | — | 💤 | |
 | `UnixSocketProvider` trait | ✓ | — | 🔒 | `#[cfg(unix)]` in reqwest; Windows has AF_UNIX since 1803 but WinHTTP does not expose it |
 | `WindowsNamedPipeProvider` trait | ✓ | — | 🔒 | Windows named pipes; not exposed via WinHTTP |
 
@@ -94,12 +94,12 @@ Each row is a single public API item. Status meanings:
 | Method | reqwest | wrest | Status | Notes |
 |--------|---------|-------|--------|-------|
 | `connection_verbose()` | ✓ | ✓ | ✅ | |
-| `pool_idle_timeout()` | ✓ | — | 🔇 | no-op under `noop-compat` |
-| `pool_max_idle_per_host()` | ✓ | — | 🔇 | no-op under `noop-compat` |
-| `tcp_nodelay()` | ✓ | — | 🔇 | no-op under `noop-compat` |
-| `tcp_keepalive()` | ✓ | — | 🔇 | no-op under `noop-compat` |
-| `tcp_keepalive_interval()` | ✓ | — | 🔇 | no-op under `noop-compat` |
-| `tcp_keepalive_retries()` | ✓ | — | 🔇 | no-op under `noop-compat` |
+| `pool_idle_timeout()` | ✓ | — | 🔇 | |
+| `pool_max_idle_per_host()` | ✓ | — | 🔇 | |
+| `tcp_nodelay()` | ✓ | — | 🔇 | |
+| `tcp_keepalive()` | ✓ | — | 🔇 | |
+| `tcp_keepalive_interval()` | ✓ | — | 🔇 | |
+| `tcp_keepalive_retries()` | ✓ | — | 🔇 | |
 | `local_address()` | ✓ | — | 🔒 | WinHTTP manages binding |
 | `interface()` | ✓ | — | 🔒 | WinHTTP manages binding |
 | `max_connections_per_host()` | — | ✓ | ✅ | wrest extension via WinHTTP |
@@ -109,7 +109,7 @@ Each row is a single public API item. Status meanings:
 | Method | reqwest | wrest | Status | Notes |
 |--------|---------|-------|--------|-------|
 | `redirect()` | ✓ | ✓ | ✅ | `Policy::limited()` and `Policy::none()` only |
-| `referer()` | ✓ | — | 💤 | not implemented |
+| `referer()` | ✓ | — | 💤 | |
 
 ### Proxy
 
@@ -127,14 +127,14 @@ Each row is a single public API item. Status meanings:
 | `tls_danger_accept_invalid_hostnames()` / `danger_accept_invalid_hostnames()` | ✓ | — | 🔒 | SChannel validates hostnames |
 | `tls_version_min()` / `min_tls_version()` | ✓ | — | 🔒 | SChannel manages negotiation |
 | `tls_version_max()` / `max_tls_version()` | ✓ | — | 🔒 | SChannel manages negotiation |
-| `tls_sni()` | ✓ | — | 🔇 | no-op under `noop-compat`; SNI always enabled |
-| `tls_info()` | ✓ | — | 💤 | no `TlsInfo` extension |
+| `tls_sni()` | ✓ | — | 🔇 | SNI always enabled |
+| `tls_info()` | ✓ | — | 💤 | |
 | `tls_certs_merge()` / `add_root_certificate()` | ✓ | — | 🔒 | OS cert store |
 | `tls_certs_only()` | ✓ | — | 🔒 | OS cert store |
 | `tls_crls_only()` | ✓ | — | 🔒 | rustls only |
 | `add_crl()` | ✓ | — | 🔒 | rustls only |
 | `add_crls()` | ✓ | — | 🔒 | rustls only |
-| `tls_backend_native()` / `use_native_tls()` | ✓ | — | 🔇 | no-op under `noop-compat`; always SChannel |
+| `tls_backend_native()` / `use_native_tls()` | ✓ | — | 🔇 | always SChannel |
 | `tls_backend_rustls()` / `use_rustls_tls()` | ✓ | — | N/A | always SChannel |
 | `tls_backend_preconfigured()` / `use_preconfigured_tls()` | ✓ | — | N/A | always SChannel |
 | `identity()` | ✓ | — | 🔒 | client certs via OS store, not exposed |
@@ -144,31 +144,31 @@ Each row is a single public API item. Status meanings:
 | Method | reqwest | wrest | Status | Notes |
 |--------|---------|-------|--------|-------|
 | `http1_only()` | ✓ | ✓ | ✅ | functional — disables HTTP/2 flag |
-| `http2_prior_knowledge()` | ✓ | — | 🔇 | no-op under `noop-compat` |
+| `http2_prior_knowledge()` | ✓ | — | 🔇 | |
 | `http3_prior_knowledge()` | ✓ | — | 💤 | requires explicit `WINHTTP_PROTOCOL_FLAG_HTTP3`; not enabled to avoid QUIC/UDP timeout regressions |
 
 ### HTTP/1 Tuning
 
 | Method | reqwest | wrest | Status | Notes |
 |--------|---------|-------|--------|-------|
-| `http09_responses()` | ✓ | — | 🔇 | no-op under `noop-compat` |
-| `http1_title_case_headers()` | ✓ | — | 🔇 | no-op under `noop-compat` |
-| `http1_allow_obsolete_multiline_headers_in_responses()` | ✓ | — | 🔇 | no-op under `noop-compat` |
-| `http1_ignore_invalid_headers_in_responses()` | ✓ | — | 🔇 | no-op under `noop-compat` |
-| `http1_allow_spaces_after_header_name_in_responses()` | ✓ | — | 🔇 | no-op under `noop-compat` |
+| `http09_responses()` | ✓ | — | 🔇 | |
+| `http1_title_case_headers()` | ✓ | — | 🔇 | |
+| `http1_allow_obsolete_multiline_headers_in_responses()` | ✓ | — | 🔇 | |
+| `http1_ignore_invalid_headers_in_responses()` | ✓ | — | 🔇 | |
+| `http1_allow_spaces_after_header_name_in_responses()` | ✓ | — | 🔇 | |
 
 ### HTTP/2 Tuning
 
 | Method | reqwest | wrest | Status | Notes |
 |--------|---------|-------|--------|-------|
-| `http2_initial_stream_window_size()` | ✓ | — | 🔇 | no-op under `noop-compat` |
-| `http2_initial_connection_window_size()` | ✓ | — | 🔇 | no-op under `noop-compat` |
-| `http2_adaptive_window()` | ✓ | — | 🔇 | no-op under `noop-compat` |
-| `http2_max_frame_size()` | ✓ | — | 🔇 | no-op under `noop-compat` |
-| `http2_max_header_list_size()` | ✓ | — | 🔇 | no-op under `noop-compat` |
-| `http2_keep_alive_interval()` | ✓ | — | 🔇 | no-op under `noop-compat` |
-| `http2_keep_alive_timeout()` | ✓ | — | 🔇 | no-op under `noop-compat` |
-| `http2_keep_alive_while_idle()` | ✓ | — | 🔇 | no-op under `noop-compat` |
+| `http2_initial_stream_window_size()` | ✓ | — | 🔇 | |
+| `http2_initial_connection_window_size()` | ✓ | — | 🔇 | |
+| `http2_adaptive_window()` | ✓ | — | 🔇 | |
+| `http2_max_frame_size()` | ✓ | — | 🔇 | |
+| `http2_max_header_list_size()` | ✓ | — | 🔇 | |
+| `http2_keep_alive_interval()` | ✓ | — | 🔇 | |
+| `http2_keep_alive_timeout()` | ✓ | — | 🔇 | |
+| `http2_keep_alive_while_idle()` | ✓ | — | 🔇 | |
 
 ### HTTP/3 Tuning (`http3` + `reqwest_unstable`)
 
@@ -187,17 +187,17 @@ Each row is a single public API item. Status meanings:
 
 | Method | reqwest | wrest | Status | Notes |
 |--------|---------|-------|--------|-------|
-| `cookie_store()` | ✓ | — | 💤 | not implemented |
-| `cookie_provider()` | ✓ | — | 💤 | not implemented |
+| `cookie_store()` | ✓ | — | 💤 | |
+| `cookie_provider()` | ✓ | — | 💤 | |
 
 ### Decompression
 
 | Method | reqwest | wrest | Status | Notes |
 |--------|---------|-------|--------|-------|
-| `gzip()` | ✓ | — | 🔇 | no-op; WinHTTP decompresses automatically |
-| `brotli()` | ✓ | — | 🔇 | no-op; WinHTTP only does gzip/deflate |
-| `deflate()` | ✓ | — | 🔇 | no-op; WinHTTP decompresses automatically |
-| `zstd()` | ✓ | — | 🔇 | no-op; WinHTTP only does gzip/deflate |
+| `gzip()` | ✓ | — | 🔇 | WinHTTP decompresses automatically |
+| `brotli()` | ✓ | — | 🔇 | WinHTTP only does gzip/deflate |
+| `deflate()` | ✓ | — | 🔇 | WinHTTP decompresses automatically |
+| `zstd()` | ✓ | — | 🔇 | WinHTTP only does gzip/deflate |
 
 ### DNS
 
@@ -206,13 +206,13 @@ Each row is a single public API item. Status meanings:
 | `dns_resolver()` | ✓ | — | 🔒 | WinHTTP manages DNS |
 | `resolve()` | ✓ | — | 🔒 | " |
 | `resolve_to_addrs()` | ✓ | — | 🔒 | " |
-| `no_hickory_dns()` / `no_trust_dns()` | ✓ | — | 🔇 | no-op under `noop-compat`; wrest doesn't bundle a DNS resolver |
+| `no_hickory_dns()` / `no_trust_dns()` | ✓ | — | 🔇 | wrest doesn't bundle a DNS resolver |
 
 ### Other ClientBuilder
 
 | Method | reqwest | wrest | Status | Notes |
 |--------|---------|-------|--------|-------|
-| `https_only()` | ✓ | — | 💤 | not implemented |
+| `https_only()` | ✓ | — | 💤 | |
 | `connector_layer()` | ✓ | — | 🔒 | Tower connector layers not applicable |
 | `retry()` | ✓ | ✓ | ✅ | |
 
@@ -270,8 +270,8 @@ Each row is a single public API item. Status meanings:
 | `query()` | ✓ | ✓ | ✅ | behind `query` feature |
 | `form()` | ✓ | ✓ | ✅ | behind `form` feature; uses `serde_json` → `form_urlencoded` bridge (reqwest uses `serde_urlencoded`). Nested objects produce a JSON string in wrest vs error in reqwest. |
 | `json()` | ✓ | ✓ | ✅ | behind `json` feature |
-| `version()` | ✓ | — | 🔇 | no-op under `noop-compat` |
-| `multipart()` | ✓ | — | 💤 | multipart module not implemented |
+| `version()` | ✓ | — | 🔇 | |
+| `multipart()` | ✓ | — | 💤 | |
 | `build()` | ✓ | ✓ | ✅ | |
 | `build_split()` | ✓ | ✓ | ✅ | |
 | `send()` | ✓ | ✓ | ✅ | |
@@ -299,9 +299,9 @@ Each row is a single public API item. Status meanings:
 | `bytes_stream()` | ✓ | ✓ | ✅ | |
 | `error_for_status()` | ✓ | ✓ | ✅ | |
 | `error_for_status_ref()` | ✓ | ✓ | ✅ | |
-| `remote_addr()` | ✓ | — | 🔇 | no-op (always `None`) under `noop-compat` |
-| `cookies()` | ✓ | — | 💤 | cookie module not implemented |
-| `upgrade()` | ✓ | — | 💤 | HTTP upgrades not implemented |
+| `remote_addr()` | ✓ | — | 🔇 | no-op: always `None` |
+| `cookies()` | ✓ | — | 💤 | |
+| `upgrade()` | ✓ | — | 💤 | |
 
 ---
 
@@ -313,8 +313,8 @@ Each row is a single public API item. Status meanings:
 | `wrap_stream()` | ✓ | ✓ | ✅ | |
 | `try_clone()` | ✓ | ✓ | ✅ | |
 | `content_length()` | ✓ | — | 💤 | |
-| `From<Bytes>` | ✓ (zero-copy) | ✓ (zero-copy) | ✅ | |
-| `From<&'static [u8]>` | ✓ (zero-copy) | ✓ (zero-copy) | ✅ | |
+| `From<Bytes>` | ✓ | ✓ | ✅ | zero-copy |
+| `From<&'static [u8]>` | ✓ | ✓ | ✅ | zero-copy |
 | `From<Vec<u8>>` | ✓ | ✓ | ✅ | |
 | `From<String>` | ✓ | ✓ | ✅ | |
 | `From<&'static str>` | ✓ | ✓ | ✅ | |
@@ -353,9 +353,9 @@ are feasible future work unless noted otherwise.
 | `username()` | ✓ | ✓ | ✅ | |
 | `password()` | ✓ | ✓ | ✅ | |
 | `domain()` | ✓ | — | 💤 | |
-| `has_host()` | ✓ | — | 💤 | always `true` for HTTP(S) |
-| `has_authority()` | ✓ | — | 💤 | |
-| `cannot_be_a_base()` | ✓ | — | 💤 | always `false` for HTTP(S) |
+| `has_host()` | ✓ | — | 💤 | always true for HTTP(S) |
+| `has_authority()` | ✓ | — | 💤 | always true for HTTP(S) |
+| `cannot_be_a_base()` | ✓ | — | 💤 | always false for HTTP(S) |
 | `origin()` | ✓ | — | 💤 | |
 
 ### Parsing & navigation
@@ -410,7 +410,7 @@ are feasible future work unless noted otherwise.
 | `is_body()` | ✓ | ✓ | ✅ | |
 | `is_redirect()` | ✓ | ✓ | ✅ | |
 | `is_decode()` | ✓ | ✓ | ✅ | |
-| `is_upgrade()` | ✓ | — | 🔇 | no-op under `noop-compat` |
+| `is_upgrade()` | ✓ | — | 🔇 | |
 | `status()` | ✓ | ✓ | ✅ | |
 | `url()` | ✓ | ✓ | ✅ | |
 | `url_mut()` | ✓ | ✓ | ✅ | |
@@ -427,9 +427,9 @@ are feasible future work unless noted otherwise.
 | `http()` | ✓ | ✓ | ✅ | |
 | `https()` | ✓ | ✓ | ✅ | |
 | `basic_auth()` | ✓ | ✓ | ✅ | |
-| `no_proxy()` | ✓ | — | 🔇 | no-op under `noop-compat` |
+| `no_proxy()` | ✓ | — | 🔇 | |
 | `custom()` | ✓ | — | 💤 | per-URL proxy selection via closure |
-| `custom_http_auth()` | ✓ | — | 💤 | not implemented |
+| `custom_http_auth()` | ✓ | — | 💤 | |
 | `headers()` | ✓ | — | 💤 | custom headers on proxy requests |
 | SOCKS5 proxy (`socks5://`) | ✓ | — | 🔒 | WinHTTP only supports HTTP CONNECT proxies |
 
@@ -460,7 +460,7 @@ are feasible future work unless noted otherwise.
 | `Certificate` — `from_pem()`, `from_der()`, `from_pem_bundle()` | 🔒 | OS cert store |
 | `Identity` — `from_pkcs12_der()`, `from_pkcs8_pem()`, `from_pem()` | 🔒 | OS cert store |
 | `Version` — `TLS_1_0`, `TLS_1_1`, `TLS_1_2`, `TLS_1_3` | 🔒 | SChannel negotiates |
-| `TlsInfo` — `peer_certificate()` | 💤 | not exposed |
+| `TlsInfo` — `peer_certificate()` | 💤 | |
 | `CertificateRevocationList` — `from_pem()`, `from_der()` | 🔒 | rustls only concept |
 
 ## `dns` Module Types (reqwest only)
@@ -474,16 +474,16 @@ are feasible future work unless noted otherwise.
 
 | Type | Status | Notes |
 |------|--------|-------|
-| `Jar` | 💤 | not implemented |
-| `CookieStore` trait | 💤 | " |
-| `Cookie` (response iterator item) | 💤 | " |
+| `Jar` | 💤 | |
+| `CookieStore` trait | 💤 | |
+| `Cookie` (response iterator item) | 💤 | |
 
 ## `multipart` Module Types (reqwest only)
 
 | Type | Status | Notes |
 |------|--------|-------|
-| `Form` | 💤 | not implemented |
-| `Part` | 💤 | " |
+| `Form` | 💤 | |
+| `Part` | 💤 | |
 
 ## `retry` Module
 
@@ -498,19 +498,19 @@ are feasible future work unless noted otherwise.
 
 | Method | reqwest | wrest | Status | Notes |
 |--------|---------|-------|--------|-------|
-| `scoped()` | ✓ (`impl Scope`) | ✓ (closure) | ✅ | both sealed — external callers use `for_host()` |
+| `scoped()` | ✓ | ✓ | ✅ | sealed; callers are meant to use `for_host()` |
 | `no_budget()` | ✓ | ✓ | ✅ | |
 | `max_extra_load()` | ✓ | ✓ | ✅ | |
 | `max_retries_per_request()` | ✓ | ✓ | ✅ | |
 | `classify_fn()` | ✓ | ✓ | ✅ | |
-| `classify()` | ✓ (`impl Classify`) | — | N/A | reqwest’s `Classify` trait is sealed (private module) — external callers cannot implement it; `classify_fn()` is the usable equivalent |
+| `classify()` | ✓ | — | N/A | sealed trait / unusable; use `classify_fn()` instead |
 
 ### `ReqRep` Methods (received by `classify_fn` closures)
 
 | Method | reqwest | wrest | Status | Notes |
 |--------|---------|-------|--------|-------|
 | `method()` | ✓ | ✓ | ✅ | |
-| `uri()` | ✓ (`&http::Uri`) | ✓ (`&http::Uri`) | ✅ | |
+| `uri()` | ✓ | ✓ | ✅ | |
 | `status()` | ✓ | ✓ | ✅ | |
 | `error()` | ✓ | ✓ | ✅ | |
 | `retryable()` | ✓ | ✓ | ✅ | |

@@ -589,7 +589,8 @@ pub(crate) async fn execute_request(
 
             // Set proxy Basic-auth credentials if provided.
             if let Some((username, password)) = proxy_creds {
-                abi::winhttp_set_proxy_credentials(request_handle.0, username, password);
+                abi::winhttp_set_proxy_credentials(request_handle.0, username, password)
+                    .url_context(url)?;
             }
         }
         ProxyAction::Automatic => {
