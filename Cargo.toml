@@ -221,18 +221,8 @@ futures-timer = "3"
 clap = { version = "4", features = ["derive"] }
 
 [[example]]
-name = "simple_get"
-required-features = ["json"]
-doc-scrape-examples = true
-
-[[example]]
 name = "json_crud"
 required-features = ["json"]
-doc-scrape-examples = true
-
-[[example]]
-name = "concurrent"
-required-features = ["json", "query"]
 doc-scrape-examples = true
 
 [[example]]
@@ -243,10 +233,6 @@ doc-scrape-examples = true
 [[example]]
 name = "hn_live"
 required-features = ["json"]
-doc-scrape-examples = true
-
-[[example]]
-name = "streaming"
 doc-scrape-examples = true
 
 [[example]]
