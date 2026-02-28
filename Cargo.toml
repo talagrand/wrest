@@ -218,6 +218,7 @@ serde = { version = "1", features = ["derive"] }
 base64 = "0.22"
 futures-util = "0.3.31"
 futures-timer = "3"
+clap = { version = "4", features = ["derive"] }
 
 [[example]]
 name = "simple_get"
@@ -246,5 +247,9 @@ doc-scrape-examples = true
 
 [[example]]
 name = "streaming"
+doc-scrape-examples = true
+
+[[example]]
+name = "whirl"
 doc-scrape-examples = true
 
