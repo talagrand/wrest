@@ -942,18 +942,20 @@ pub(crate) async fn read_chunk(
         return Err(Error::request("read buffer missing after read (invariant violated)")
             .with_url(url.clone()));
     };
-    debug_assert!(
-        (read as usize) <= buf.capacity(),
-        "WinHTTP reported {read} bytes read but buffer capacity is {}",
-        buf.capacity(),
-    );
-    // SAFETY: `buf` was allocated with `BytesMut::with_capacity(to_read)`
-    // and passed to `WinHttpReadData` which wrote exactly `read` bytes
-    // into it.  The `debug_assert!` above confirms `read <= capacity`.
-    unsafe {
-        buf.set_len(read as usize);
+    if (read as usize) > buf.capacity() {
+        return Err(Error::request(format!(
+            "WinHTTP reported {read} bytes read but buffer capacity is {} (invariant violated)",
+            buf.capacity(),
+        ))
+        .with_url(url.clone()));
+    } else {
+        // SAFETY: `buf` was allocated with `BytesMut::with_capacity(to_read)`
+        // and passed to `WinHttpReadData` which wrote exactly `read` bytes.
+        unsafe {
+            buf.set_len(read as usize);
+        }
+        Ok(Some(buf.freeze()))
     }
-    Ok(Some(buf.freeze()))
 }
 
 // ---------------------------------------------------------------------------

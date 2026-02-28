@@ -14,6 +14,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 - Fixed `WinHttpSetCredentials` return value being silently discarded; proxy auth failures now propagate as errors instead of producing 407 responses.
+- Hardened charset extraction from headers to prevent false positives from substrings like `x=charset=wrong`.
+- Fixed `Url::from_http_uri` to match `Url::parse` handling for default ports (80/443) - they should not be marked as explict.
+- Hardened handling of URLs with a `@` in the userinfo itself - always favor the *last* `@`.
 
 ## 0.5.3
 

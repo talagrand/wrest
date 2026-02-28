@@ -446,17 +446,29 @@ fn decode_utf16be(data: &[u8]) -> Result<String, Error> {
 pub(crate) fn extract_charset_from_content_type(headers: &http::HeaderMap) -> Option<String> {
     let ct = headers.get(http::header::CONTENT_TYPE)?;
     let ct_str = ct.to_str().ok()?;
-    let lower = ct_str.to_ascii_lowercase();
-    let idx = lower.find("charset=")?;
-    let value = ct_str.get(idx + 8..)?;
-    let value = value.trim_start_matches('"');
-    let end = value
-        .find(|c: char| c == '"' || c == ';' || c.is_ascii_whitespace())
-        .unwrap_or(value.len());
-    if end == 0 {
-        return None;
+    // Split on ';' and search each parameter for `charset=…`.
+    // Skipping the media-type segment avoids false positives from
+    // substrings embedded in unrelated parameter values
+    // (e.g. `x=charset=wrong; charset=right`).
+    for param in ct_str.split(';').skip(1) {
+        let trimmed = param.trim();
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("charset") {
+            continue;
+        }
+        let value = value.trim_start_matches('"');
+        let charset: String = value
+            .chars()
+            .take_while(|&c| c != '"' && c != ';' && !c.is_ascii_whitespace())
+            .collect();
+        if charset.is_empty() {
+            return None;
+        }
+        return Some(charset);
     }
-    Some(value.get(..end)?.to_owned())
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -710,6 +722,18 @@ mod tests {
             ("text/html; charset=", None, "empty charset value"),
             // Empty quoted charset= value → None
             ("text/html; charset=\"\"", None, "empty quoted charset value"),
+            // Substring "charset=" inside another parameter's
+            // value must not be treated as the charset parameter.
+            (
+                "text/html; x=charset=wrong; charset=right",
+                Some("right"),
+                "charset substring in other param value",
+            ),
+            // charset= as part of a longer parameter name must not match
+            ("text/html; notcharset=oops", None, "charset prefix in param name"),
+            // Case-insensitive parameter name
+            ("text/html; Charset=Latin1", Some("Latin1"), "uppercase Charset"),
+            ("text/html; CHARSET=Big5", Some("Big5"), "all-caps CHARSET"),
         ];
 
         for &(content_type, expected, desc) in cases {

@@ -633,7 +633,7 @@ impl Url {
 
         let default_port: u16 = if is_https { 443 } else { 80 };
         let port = authority.port_u16().unwrap_or(default_port);
-        let explicit_port = authority.port_u16().is_some();
+        let explicit_port = port != default_port;
 
         let (path, query) = match uri.path_and_query() {
             Some(pq) => {
@@ -656,7 +656,7 @@ impl Url {
 
         // Extract userinfo from the authority (RFC 3986 §3.2.1).
         let auth_str = authority.as_str();
-        let (username, password) = match auth_str.split_once('@') {
+        let (username, password) = match auth_str.rsplit_once('@') {
             Some((userinfo, _)) => match userinfo.split_once(':') {
                 Some((u, p)) => (percent_decode(u), Some(percent_decode(p))),
                 None => (percent_decode(userinfo), None),
@@ -755,10 +755,10 @@ fn extract_userinfo(url: &str) -> (std::borrow::Cow<'_, str>, String, Option<Str
     let password = raw_pass.map(percent_decode);
 
     // Reconstruct the URL without userinfo: skip past "userinfo@".
-    // We already found '@' in `authority_part` above, so `split_once('@')`
+    // We already found '@' in `authority_part` above, so `rsplit_once('@')`
     // on the full `authority_and_rest` always succeeds.
     let after_at = authority_and_rest
-        .split_once('@')
+        .rsplit_once('@')
         .map_or(authority_and_rest, |(_, rest)| rest);
     let cleaned = format!("{scheme_colon_slashes}://{after_at}");
 
@@ -1299,6 +1299,8 @@ mod tests {
             ("https://example.com/path", "https://example.com/path", "", None),
             ("https://alice:pw@host:8080/path", "https://host:8080/path", "alice", Some("pw")),
             ("http://user@host", "http://host", "user", None),
+            // Defend against a userinfo containing a literal '@' - we need to split at the last '@'
+            ("https://user%40name:pw@host/p", "https://host/p", "user@name", Some("pw")),
         ];
 
         for &(input, cleaned, user, pass) in cases {
@@ -1519,6 +1521,22 @@ mod tests {
                 ("/api", Some("v=2")),
                 ("", None),
                 ":4433",
+            ),
+            (
+                "http default port explicit",
+                "http://example.com:80/path",
+                ("http", "example.com", 80, None),
+                ("/path", None),
+                ("", None),
+                "http://example.com/path",
+            ),
+            (
+                "https default port explicit",
+                "https://example.com:443/path",
+                ("https", "example.com", 443, None),
+                ("/path", None),
+                ("", None),
+                "https://example.com/path",
             ),
         ];
 
