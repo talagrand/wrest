@@ -71,7 +71,7 @@ pub struct ClientBuilder {
     proxy_config: Option<ProxyConfig>,
     default_headers: HeaderMap,
     redirect_policy: Option<crate::redirect::Policy>,
-    danger_accept_invalid_certs: bool,
+    tls_danger_accept_invalid_certs: bool,
     http1_only: bool,
     error: Option<Error>,
     retry_policy: Option<crate::retry::Builder>,
@@ -342,7 +342,7 @@ impl ClientBuilder {
             proxy_config: None,
             default_headers: HeaderMap::new(),
             redirect_policy: None,
-            danger_accept_invalid_certs: false,
+            tls_danger_accept_invalid_certs: false,
             http1_only: false,
             error: None,
             retry_policy: None,
@@ -805,19 +805,14 @@ impl ClientBuilder {
     /// Requires the `noop-compat` feature.
     #[cfg(feature = "noop-compat")]
     #[must_use]
-    pub fn use_native_tls(self) -> Self {
+    pub fn tls_backend_native(self) -> Self {
         self
     }
 
-    /// Force using the native TLS backend.
-    ///
-    /// # No-op -- reqwest compatibility
-    ///
-    /// wrest always uses the native TLS backend (SChannel via WinHTTP).
-    /// Requires the `noop-compat` feature.
+    /// Deprecated alias for [`tls_backend_native()`](Self::tls_backend_native).
     #[cfg(feature = "noop-compat")]
     #[must_use]
-    pub fn tls_backend_native(self) -> Self {
+    pub fn use_native_tls(self) -> Self {
         self
     }
 
@@ -830,19 +825,6 @@ impl ClientBuilder {
     #[cfg(feature = "noop-compat")]
     #[must_use]
     pub fn no_hickory_dns(self) -> Self {
-        self
-    }
-
-    /// Disable the trust-dns async resolver.
-    ///
-    /// # No-op -- reqwest compatibility
-    ///
-    /// Deprecated alias for [`no_hickory_dns()`](Self::no_hickory_dns).
-    /// wrest does not bundle any DNS resolver.  Requires the
-    /// `noop-compat` feature.
-    #[cfg(feature = "noop-compat")]
-    #[must_use]
-    pub fn no_trust_dns(self) -> Self {
         self
     }
 
@@ -905,9 +887,15 @@ impl ClientBuilder {
     /// This is **dangerous** and should only be used for testing or
     /// in controlled environments. It disables all certificate validation.
     #[must_use]
-    pub fn danger_accept_invalid_certs(mut self, accept: bool) -> Self {
-        self.danger_accept_invalid_certs = accept;
+    pub fn tls_danger_accept_invalid_certs(mut self, accept: bool) -> Self {
+        self.tls_danger_accept_invalid_certs = accept;
         self
+    }
+
+    /// Deprecated alias for [`tls_danger_accept_invalid_certs()`](Self::tls_danger_accept_invalid_certs).
+    #[must_use]
+    pub fn danger_accept_invalid_certs(self, accept: bool) -> Self {
+        self.tls_danger_accept_invalid_certs(accept)
     }
 
     /// Restrict the client to HTTP/1.x only.
@@ -999,7 +987,7 @@ impl ClientBuilder {
             read_timeout_ms,
             total_timeout_ms = self.timeout.map(|d| d.as_millis() as u64),
             proxy = ?config.proxy,
-            accept_invalid_certs = self.danger_accept_invalid_certs,
+            accept_invalid_certs = self.tls_danger_accept_invalid_certs,
             "client built",
         );
 
@@ -1009,7 +997,7 @@ impl ClientBuilder {
                 total_timeout: self.timeout,
                 proxy_config,
                 default_headers: self.default_headers,
-                accept_invalid_certs: self.danger_accept_invalid_certs,
+                accept_invalid_certs: self.tls_danger_accept_invalid_certs,
                 retry_policy: self
                     .retry_policy
                     .unwrap_or_else(crate::retry::Builder::default)
@@ -1219,8 +1207,7 @@ mod tests {
             .use_native_tls()
             .tls_backend_native()
             // DNS
-            .no_hickory_dns()
-            .no_trust_dns();
+            .no_hickory_dns();
 
         // Verify the builder is still usable after all stubs.
         let client = builder.build();
@@ -1273,9 +1260,9 @@ mod tests {
                 "redirect_policy",
             ),
             (
-                |b| b.danger_accept_invalid_certs(true),
-                |b| b.danger_accept_invalid_certs,
-                "danger_accept_invalid_certs",
+                |b| b.tls_danger_accept_invalid_certs(true),
+                |b| b.tls_danger_accept_invalid_certs,
+                "tls_danger_accept_invalid_certs",
             ),
             (|b| b.http1_only(), |b| b.http1_only, "http1_only"),
             (|b| b.no_proxy(), |b| b.proxy_config.is_some(), "no_proxy"),
@@ -1328,7 +1315,7 @@ mod tests {
     #[test]
     fn builder_accept_invalid_certs_propagated() {
         let client = Client::builder()
-            .danger_accept_invalid_certs(true)
+            .tls_danger_accept_invalid_certs(true)
             .build()
             .unwrap();
         assert!(client.inner.accept_invalid_certs);

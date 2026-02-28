@@ -122,8 +122,7 @@ Each row is a single public API item. Status meanings:
 
 | Method | reqwest | wrest | Status | Notes |
 |--------|---------|-------|--------|-------|
-| `danger_accept_invalid_certs()` | ✓ | ✓ | ✅ | functional |
-| `tls_danger_accept_invalid_certs()` | ✓ | — | 💤 | reqwest 0.13 renamed; wrest has the old name |
+| `tls_danger_accept_invalid_certs()` / `danger_accept_invalid_certs()` | ✓ | ✓ | ✅ | |
 | `tls_danger_accept_invalid_hostnames()` / `danger_accept_invalid_hostnames()` | ✓ | — | 🔒 | SChannel validates hostnames |
 | `tls_version_min()` / `min_tls_version()` | ✓ | — | 🔒 | SChannel manages negotiation |
 | `tls_version_max()` / `max_tls_version()` | ✓ | — | 🔒 | SChannel manages negotiation |
@@ -134,7 +133,7 @@ Each row is a single public API item. Status meanings:
 | `tls_crls_only()` | ✓ | — | 🔒 | rustls only |
 | `add_crl()` | ✓ | — | 🔒 | rustls only |
 | `add_crls()` | ✓ | — | 🔒 | rustls only |
-| `tls_backend_native()` / `use_native_tls()` | ✓ | — | 🔇 | always SChannel |
+| `tls_backend_native()` / `use_native_tls()` | ✓ | ✓ | 🔇 | always SChannel |
 | `tls_backend_rustls()` / `use_rustls_tls()` | ✓ | — | N/A | always SChannel |
 | `tls_backend_preconfigured()` / `use_preconfigured_tls()` | ✓ | — | N/A | always SChannel |
 | `identity()` | ✓ | — | 🔒 | client certs via OS store, not exposed |
@@ -206,7 +205,7 @@ Each row is a single public API item. Status meanings:
 | `dns_resolver()` | ✓ | — | 🔒 | WinHTTP manages DNS |
 | `resolve()` | ✓ | — | 🔒 | " |
 | `resolve_to_addrs()` | ✓ | — | 🔒 | " |
-| `no_hickory_dns()` / `no_trust_dns()` | ✓ | — | 🔇 | wrest doesn't bundle a DNS resolver |
+| `no_hickory_dns()` | ✓ | — | 🔇 | wrest doesn't bundle a DNS resolver |
 
 ### Other ClientBuilder
 
@@ -529,8 +528,8 @@ are feasible future work unless noted otherwise.
 
 | Status | Count |
 |--------|-------|
-| ✅ Implemented | 159 |
-| 🔇 No-op (`noop-compat`) | 31 |
+| ✅ Implemented | 160 |
+| 🔇 No-op (`noop-compat`) | 32 |
 | 🔒 Cannot implement (WinHTTP limitation) | 39 |
-| 💤 Not yet implemented | 48 |
+| 💤 Not yet implemented | 47 |
 | N/A | 3 |

@@ -208,20 +208,20 @@ async fn badssl_invalid_certs_rejected() {
     }
 }
 
-/// Test danger_accept_invalid_certs allows self-signed certificates
+/// Test tls_danger_accept_invalid_certs allows self-signed certificates
 #[cfg(any(native_winhttp, feature = "default-tls", feature = "native-tls"))]
 #[tokio::test]
 async fn badssl_with_accept_invalid_certs() {
-    // With danger_accept_invalid_certs, we should succeed
+    // With tls_danger_accept_invalid_certs, we should succeed
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
-        .danger_accept_invalid_certs(true)
+        .tls_danger_accept_invalid_certs(true)
         .build()
         .expect("client should build");
 
     let result = client.get("https://self-signed.badssl.com/").send().await;
 
-    assert!(result.is_ok(), "with danger_accept_invalid_certs should succeed");
+    assert!(result.is_ok(), "with tls_danger_accept_invalid_certs should succeed");
 }
 
 // -----------------------------------------------------------------------

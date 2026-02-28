@@ -1639,7 +1639,7 @@ async fn redirect_policy_limited_exceeded() {
     }
 }
 
-// NOTE: `danger_accept_invalid_certs` builder option is covered by
+// NOTE: `tls_danger_accept_invalid_certs` builder option is covered by
 // `client::tests::builder_accept_invalid_certs_propagated` (unit) and
 // `real_world::badssl_with_accept_invalid_certs` (end-to-end with real cert).
 
