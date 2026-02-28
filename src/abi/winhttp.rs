@@ -389,18 +389,18 @@ pub(crate) fn winhttp_set_proxy_credentials(
     handle: RawWinHttpHandle,
     username: &str,
     password: &str,
-) {
+) -> Result<(), Error> {
     let user = to_wide(username);
     let pass = to_wide(password);
     unsafe {
-        WinHttpSetCredentials(
+        check_win32_bool(WinHttpSetCredentials(
             handle,
             WINHTTP_AUTH_TARGET_PROXY,
             WINHTTP_AUTH_SCHEME_BASIC,
             user.as_ptr(),
             pass.as_ptr(),
             std::ptr::null_mut(),
-        );
+        ))
     }
 }
 
