@@ -1,6 +1,6 @@
 [package]
 name = "wrest"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 rust-version = "1.90"
 description = "Async HTTP client for Windows backed by WinHTTP, with a reqwest-compatible API"

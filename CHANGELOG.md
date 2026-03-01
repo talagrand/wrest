@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to Semantic Versioning.
 
-## Unreleased
+## 0.5.4
 
 ### Added
 - Added `whirl` example: a tiny curl-like CLI demonstrating streaming downloads with progress display.
@@ -14,14 +14,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Changed
 - Consolidated examples from 7 to 4, removing `simple_get`, `concurrent`, and `streaming` (all subsumed by `whirl` and remaining examples).
 - `ClientBuilder::tls_danger_accept_invalid_certs()` alias for `danger_accept_invalid_certs()` to match reqwest 0.13.
-- Removed `ClientBuilder::no_trust_dns()` (removed in reqwest 0.12); use `no_hickory_dns()` instead. Breakage should be acceptable since we are tracking reqwest 0.13
-- Wrest errors now use `source` chain so callers that do source chain traversal in `reqwest` see the same Eorror "shape". `Error::source()` now always returns `Some` for non-status errors.
+- Removed `ClientBuilder::no_trust_dns()` (removed in reqwest 0.12); use `no_hickory_dns()` instead. Breakage should be acceptable since we are tracking reqwest 0.13.
+- Wrest errors now use `source` chain so callers that do source chain traversal in `reqwest` see the same Error "shape". `Error::source()` now always returns `Some` for non-status errors.
 - Performance: `Error` object size is now pointer-sized and errors are not greedily stringified.
 
 ### Fixed
 - Fixed `WinHttpSetCredentials` return value being silently discarded; proxy auth failures now propagate as errors instead of producing 407 responses.
 - Hardened charset extraction from headers to prevent false positives from substrings like `x=charset=wrong`.
-- Fixed `Url::from_http_uri` to match `Url::parse` handling for default ports (80/443) - they should not be marked as explict.
+- Fixed `Url::from_http_uri` to match `Url::parse` handling for default ports (80/443) - they should not be marked as explicit.
 - Hardened handling of URLs with a `@` in the userinfo itself - always favor the *last* `@`.
 
 ## 0.5.3
