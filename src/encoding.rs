@@ -734,6 +734,8 @@ mod tests {
             // Case-insensitive parameter name
             ("text/html; Charset=Latin1", Some("Latin1"), "uppercase Charset"),
             ("text/html; CHARSET=Big5", Some("Big5"), "all-caps CHARSET"),
+            // Parameter without '=' is skipped (covers the `else { continue }` branch).
+            ("text/html; boundary; charset=UTF-8", Some("UTF-8"), "param without equals sign"),
         ];
 
         for &(content_type, expected, desc) in cases {

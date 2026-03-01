@@ -1678,6 +1678,7 @@ mod tests {
                 ParseError::UnsupportedScheme,
             ),
             ("no scheme", http::Uri::from_static("/relative"), ParseError::RelativeUrlWithoutBase),
+            ("empty host", http::Uri::from_static("http://:8080/path"), ParseError::EmptyHost),
         ];
 
         for (label, uri, expected) in err_cases {

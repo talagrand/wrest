@@ -254,7 +254,7 @@ async fn error_for_status() {
 /// Full status-code matrix is covered by `response::tests::error_for_status_ref_table`.
 #[tokio::test]
 async fn error_for_status_ref() {
-    let cases: &[(u16, &str, bool)] = &[(200, "still here", false), (404, "not found", true)];
+    let cases: &[(u16, &str, bool)] = &[(200, "still here", false), (418, "I'm a teapot", true)];
 
     for &(code, body_text, expect_err) in cases {
         let server = MockServer::start().await;
@@ -331,6 +331,96 @@ async fn timeout() {
         .unwrap_err();
 
     assert!(err.is_timeout(), "expected timeout error, got: {err}");
+}
+
+/// `body_read_timeout`: total timeout expires during body consumption via
+/// `bytes_stream()`, covering the deadline-past fast-path in `chunk()` and
+/// the error-yield branch of `bytes_stream()`.
+#[cfg(any(native_winhttp, feature = "stream"))]
+#[tokio::test]
+async fn body_read_timeout() {
+    use futures_util::StreamExt;
+    use std::pin::pin;
+
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/body-timeout"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("hello"))
+        .mount(&server)
+        .await;
+
+    let client = Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()
+        .expect("client build should succeed");
+
+    let resp = client
+        .get(format!("{}/body-timeout", server.uri()))
+        .send()
+        .await
+        .expect("initial request should succeed within 500ms");
+
+    // Wait for the deadline to pass, then attempt to read the body.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let mut stream = pin!(resp.bytes_stream());
+    let err = stream
+        .next()
+        .await
+        .expect("stream should yield a timeout error, not EOF")
+        .unwrap_err();
+    assert!(err.is_timeout(), "expected timeout error, got: {err}");
+
+    // The native backend fuses the stream after an error (yields None).
+    // reqwest's stream may yield additional items, so only assert on native.
+    #[cfg(native_winhttp)]
+    assert!(stream.next().await.is_none(), "stream should be exhausted");
+}
+
+/// `body_read_timeout_mid_stream`: total timeout expires while waiting for
+/// body data that hasn't arrived yet, covering the `select()` race branch
+/// in `chunk()` where the delay future wins.
+#[cfg(any(native_winhttp, feature = "stream"))]
+#[tokio::test]
+async fn body_read_timeout_mid_stream() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    // Bind a raw TCP server that sends headers immediately but never sends a body.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        // Read the request (just drain it).
+        let mut buf = vec![0u8; 4096];
+        let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+        // Send response headers with Content-Length but no body.
+        let response = "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n";
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        // Hold connection open but never send body — client will time out.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+
+    let client = Client::builder()
+        .timeout(Duration::from_millis(300))
+        .build()
+        .expect("client build should succeed");
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{}/mid-stream", addr.port()))
+        .send()
+        .await
+        .expect("headers should arrive before timeout");
+
+    // chunk() enters the select() race with ~remaining ms, and the read
+    // future blocks because no body data arrives -> delay wins -> timeout error.
+    let err = resp.bytes().await.unwrap_err();
+    assert!(err.is_timeout(), "expected timeout error, got: {err}");
+
+    server_task.abort();
 }
 
 /// `version_reported`: response.version() returns HTTP/1.1 or HTTP/2.
@@ -1659,6 +1749,17 @@ async fn connection_verbose_tracing() {
 
     let server = MockServer::start().await;
 
+    // Redirect so the verbose REDIRECT callback fires.
+    Mock::given(method("GET"))
+        .and(path("/verbose-redir"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("Location", format!("{}/verbose", server.uri())),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
     Mock::given(method("GET"))
         .and(path("/verbose"))
         .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
@@ -1673,7 +1774,7 @@ async fn connection_verbose_tracing() {
         .expect("client with verbose tracing should build");
 
     let resp = client
-        .get(format!("{}/verbose", server.uri()))
+        .get(format!("{}/verbose-redir", server.uri()))
         .send()
         .await
         .expect("verbose request should succeed");
@@ -2132,6 +2233,51 @@ async fn retry_variants() {
 
         assert_eq!(resp.status(), *expected, "{label}");
     }
+}
+
+/// `retry_deadline_expired`: when a retry is attempted after the total
+/// timeout has already elapsed, the deadline-expired fast path fires
+/// immediately without making another network call.
+#[tokio::test]
+async fn retry_deadline_expired() {
+    let server = MockServer::start().await;
+
+    // Server delays longer than the client timeout so the first attempt
+    // times out and the retry starts after the deadline has already passed.
+    Mock::given(method("GET"))
+        .and(path("/deadline-retry"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("slow")
+                .set_delay(Duration::from_secs(2)),
+        )
+        .mount(&server)
+        .await;
+
+    let base: wrest::Url = server.uri().parse().unwrap();
+    let host = base.host_str().unwrap().to_string();
+
+    let retry = wrest::retry::for_host(host).no_budget().classify_fn(|rr| {
+        if rr.status().is_none() {
+            rr.retryable()
+        } else {
+            rr.success()
+        }
+    });
+
+    let client = Client::builder()
+        .timeout(Duration::from_millis(500))
+        .retry(retry)
+        .build()
+        .expect("client build should succeed");
+
+    let err = client
+        .get(format!("{}/deadline-retry", server.uri()))
+        .send()
+        .await
+        .unwrap_err();
+
+    assert!(err.is_timeout(), "expected timeout error, got: {err}");
 }
 
 // -----------------------------------------------------------------------

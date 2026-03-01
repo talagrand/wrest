@@ -524,7 +524,7 @@ mod tests {
             (204, true, "204 No Content"),
             (301, true, "301 redirect"),
             (400, false, "400 client error"),
-            (404, false, "404 not found"),
+            (418, false, "418 I'm a teapot"),
             (500, false, "500 server error"),
             (503, false, "503 unavailable"),
         ];
@@ -550,7 +550,7 @@ mod tests {
         let cases: &[(u16, bool, &str)] = &[
             (200, true, "200 OK"),
             (301, true, "301 redirect"),
-            (404, false, "404 not found"),
+            (418, false, "418 I'm a teapot"),
             (500, false, "500 server error"),
         ];
 
@@ -573,7 +573,7 @@ mod tests {
 
     #[test]
     fn error_for_status_preserves_url() {
-        let resp = synthetic(StatusCode::NOT_FOUND, HeaderMap::new());
+        let resp = synthetic(StatusCode::IM_A_TEAPOT, HeaderMap::new());
         let err = resp.error_for_status().unwrap_err();
         assert_eq!(err.url().map(|u| u.as_str()), Some("https://test.example.com/path"));
     }
