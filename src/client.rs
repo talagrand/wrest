@@ -1344,5 +1344,20 @@ mod tests {
             .unwrap();
         assert!(client.inner.accept_invalid_certs);
         assert!(client.inner.https_only);
+
+        // Check the alias too.
+        let client2 = Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap();
+        assert!(client2.inner.accept_invalid_certs);
+    }
+
+    #[tokio::test]
+    async fn https_only_rejects_http() {
+        let client = Client::builder().https_only(true).build().unwrap();
+        let err = client.get("http://example.com").send().await.unwrap_err();
+        assert!(err.is_builder(), "https_only should produce a builder error");
+        assert_eq!(err.url().map(|u| u.as_str()), Some("http://example.com/"),);
     }
 }

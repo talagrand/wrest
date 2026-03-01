@@ -434,10 +434,10 @@ mod tests {
             (
                 "status_client",
                 Error::status_error(
-                    StatusCode::NOT_FOUND,
-                    "https://example.com/missing".into_url().unwrap(),
+                    StatusCode::IM_A_TEAPOT,
+                    "https://example.com/brew".into_url().unwrap(),
                 ),
-                "HTTP status client error (404 Not Found) for url (https://example.com/missing)",
+                "HTTP status client error (418 I'm a teapot) for url (https://example.com/brew)",
             ),
             (
                 "status_server",
@@ -446,6 +446,18 @@ mod tests {
                     "https://example.com/fail".into_url().unwrap(),
                 ),
                 "HTTP status server error (500 Internal Server Error) for url (https://example.com/fail)",
+            ),
+            (
+                "status_no_code",
+                Error {
+                    inner: Box::new(InnerError {
+                        kind: ErrorKind::Status,
+                        source: None,
+                        status: None,
+                        url: None,
+                    }),
+                },
+                "HTTP status error",
             ),
         ];
 
@@ -486,8 +498,8 @@ mod tests {
                     inner: Box::new(InnerError {
                         kind: ErrorKind::Status,
                         source: None,
-                        status: Some(StatusCode::NOT_FOUND),
-                        url: Some(Box::new("https://example.com/missing".into_url().unwrap())),
+                        status: Some(StatusCode::IM_A_TEAPOT),
+                        url: Some(Box::new("https://example.com/brew".into_url().unwrap())),
                     }),
                 },
                 Error::is_status,
@@ -539,8 +551,8 @@ mod tests {
 
         // Verify status() and url() accessors on the Status entry.
         let status_err = &cases.iter().find(|(_, _, l)| *l == "status").unwrap().0;
-        assert_eq!(status_err.status(), Some(StatusCode::NOT_FOUND));
-        assert_eq!(status_err.url().map(|u| u.as_str()), Some("https://example.com/missing"));
+        assert_eq!(status_err.status(), Some(StatusCode::IM_A_TEAPOT));
+        assert_eq!(status_err.url().map(|u| u.as_str()), Some("https://example.com/brew"));
 
         // Non-status errors return None for both.
         let builder_err = &cases[0].0;
@@ -572,12 +584,18 @@ mod tests {
     }
 
     #[test]
-    fn error_debug_format() {
+    fn error_debug_display_source() {
         let err = Error::builder("bad config");
         let debug = format!("{err:?}");
         assert!(debug.contains("Builder"));
         // Detail string is in the source chain, visible in Debug.
         assert!(debug.contains("bad config"));
+
+        let inner = std::io::Error::other("root cause");
+        let ctx = ContextError::new("context message", inner);
+        assert_eq!(ctx.to_string(), "context message");
+        let source = StdError::source(&ctx).expect("should have source");
+        assert!(source.to_string().contains("root cause"));
     }
 
     #[test]
