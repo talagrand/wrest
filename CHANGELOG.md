@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Added
 - Added `whirl` example: a tiny curl-like CLI demonstrating streaming downloads with progress display.
+- Added `Url::domain()`, `Url::has_host()`, `Url::has_authority()`, `Url::cannot_be_a_base()`, and `Url::path_segments()` trivial accessor methods matching `url::Url`.
+- Added `ClientBuilder::https_only()` — rejects `http://` URLs at send time when enabled.
 
 ### Changed
 - Consolidated examples from 7 to 4, removing `simple_get`, `concurrent`, and `streaming` (all subsumed by `whirl` and remaining examples).

@@ -52,6 +52,8 @@ pub(crate) struct ClientInner {
     pub default_headers: HeaderMap,
     /// Whether to ignore certificate errors.
     pub accept_invalid_certs: bool,
+    /// Whether to restrict requests to HTTPS-only.
+    pub https_only: bool,
     /// Retry policy for automatically retrying failed requests.
     pub retry_policy: crate::retry::Policy,
 }
@@ -72,6 +74,7 @@ pub struct ClientBuilder {
     default_headers: HeaderMap,
     redirect_policy: Option<crate::redirect::Policy>,
     tls_danger_accept_invalid_certs: bool,
+    https_only: bool,
     http1_only: bool,
     error: Option<Error>,
     retry_policy: Option<crate::retry::Builder>,
@@ -253,6 +256,13 @@ impl Client {
     ) -> Result<crate::Response, Error> {
         let inner = &self.inner;
 
+        // Reject http:// URLs when https_only is enabled.
+        if inner.https_only && !url.is_https {
+            return Err(Error::builder(
+                "HTTPS required but got an HTTP URL",
+            ).with_url(url.clone()));
+        }
+
         // Calculate remaining time for this attempt
         let remaining_timeout =
             deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()));
@@ -343,6 +353,7 @@ impl ClientBuilder {
             default_headers: HeaderMap::new(),
             redirect_policy: None,
             tls_danger_accept_invalid_certs: false,
+            https_only: false,
             http1_only: false,
             error: None,
             retry_policy: None,
@@ -898,6 +909,18 @@ impl ClientBuilder {
         self.tls_danger_accept_invalid_certs(accept)
     }
 
+    /// Restrict the client to HTTPS-only requests.
+    ///
+    /// When enabled, any request to an `http://` URL will return an
+    /// error instead of being sent.
+    ///
+    /// Default: `false` (both HTTP and HTTPS are allowed).
+    #[must_use]
+    pub fn https_only(mut self, enabled: bool) -> Self {
+        self.https_only = enabled;
+        self
+    }
+
     /// Restrict the client to HTTP/1.x only.
     ///
     /// When set, the WinHTTP session will not enable HTTP/2 protocol
@@ -998,6 +1021,7 @@ impl ClientBuilder {
                 proxy_config,
                 default_headers: self.default_headers,
                 accept_invalid_certs: self.tls_danger_accept_invalid_certs,
+                https_only: self.https_only,
                 retry_policy: self
                     .retry_policy
                     .unwrap_or_else(crate::retry::Builder::default)
@@ -1313,11 +1337,13 @@ mod tests {
     }
 
     #[test]
-    fn builder_accept_invalid_certs_propagated() {
+    fn builder_bool_fields_propagated() {
         let client = Client::builder()
             .tls_danger_accept_invalid_certs(true)
+            .https_only(true)
             .build()
             .unwrap();
         assert!(client.inner.accept_invalid_certs);
+        assert!(client.inner.https_only);
     }
 }

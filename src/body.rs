@@ -221,18 +221,16 @@ mod tests {
     }
 
     #[test]
-    fn body_try_clone_bytes() {
+    fn try_clone_variants() {
+        // Bytes body clones successfully
         let body = Body::from("test");
         let clone = body.try_clone().unwrap();
         assert_eq!(clone.as_bytes().unwrap(), b"test");
-    }
 
-    #[test]
-    fn body_try_clone_stream_returns_none() {
+        // Stream body returns None
         let stream =
             futures_util::stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from("chunk"))]);
-        let body = Body::wrap_stream(stream);
-        assert!(body.try_clone().is_none());
+        assert!(Body::wrap_stream(stream).try_clone().is_none());
     }
 
     #[test]
