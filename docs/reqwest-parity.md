@@ -211,7 +211,7 @@ Each row is a single public API item. Status meanings:
 
 | Method | reqwest | wrest | Status | Notes |
 |--------|---------|-------|--------|-------|
-| `https_only()` | ✓ | — | 💤 | |
+| `https_only()` | ✓ | ✓ | ✅ | rejects `http://` URLs at send time |
 | `connector_layer()` | ✓ | — | 🔒 | Tower connector layers not applicable |
 | `retry()` | ✓ | ✓ | ✅ | |
 
@@ -351,10 +351,10 @@ are feasible future work unless noted otherwise.
 | `fragment()` | ✓ | ✓ | ✅ | |
 | `username()` | ✓ | ✓ | ✅ | |
 | `password()` | ✓ | ✓ | ✅ | |
-| `domain()` | ✓ | — | 💤 | |
-| `has_host()` | ✓ | — | 💤 | always true for HTTP(S) |
-| `has_authority()` | ✓ | — | 💤 | always true for HTTP(S) |
-| `cannot_be_a_base()` | ✓ | — | 💤 | always false for HTTP(S) |
+| `domain()` | ✓ | ✓ | ✅ | `None` for IP-address hosts |
+| `has_host()` | ✓ | ✓ | ✅ | always `true` for HTTP(S) |
+| `has_authority()` | ✓ | ✓ | ✅ | always `true` for HTTP(S) |
+| `cannot_be_a_base()` | ✓ | ✓ | ✅ | always `false` for HTTP(S) |
 | `origin()` | ✓ | — | 💤 | |
 
 ### Parsing & navigation
@@ -364,7 +364,7 @@ are feasible future work unless noted otherwise.
 | `parse()` | ✓ | ✓ | ✅ | Error type is `wrest::ParseError` (mirrors `url::ParseError` variants + `UnsupportedScheme`) |
 | `join()` | ✓ | ✓ | ✅ | |
 | `make_relative()` | ✓ | — | 💤 | |
-| `path_segments()` | ✓ | — | 💤 | |
+| `path_segments()` | ✓ | ✓ | ✅ | |
 | `query_pairs()` | ✓ | — | 💤 | |
 | `socket_addrs()` | ✓ | — | 🔒 | Would require DNS resolution |
 
@@ -528,8 +528,8 @@ are feasible future work unless noted otherwise.
 
 | Status | Count |
 |--------|-------|
-| ✅ Implemented | 160 |
+| ✅ Implemented | 166 |
 | 🔇 No-op (`noop-compat`) | 32 |
 | 🔒 Cannot implement (WinHTTP limitation) | 39 |
-| 💤 Not yet implemented | 47 |
+| 💤 Not yet implemented | 41 |
 | N/A | 3 |

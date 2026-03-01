@@ -365,6 +365,59 @@ impl Url {
         Url::parse_impl(&resolved)
     }
 
+    /// Return the host as a domain name, if applicable.
+    ///
+    /// Returns `None` if the host is an IP address.
+    /// Equivalent to `url::Url::domain()`.
+    pub fn domain(&self) -> Option<&str> {
+        // If the host string parses as an IP address, it's not a domain.
+        if self.host.parse::<std::net::IpAddr>().is_ok() {
+            return None;
+        }
+        // Bracket-wrapped IPv6 like `[::1]`
+        if self.host.starts_with('[') {
+            return None;
+        }
+        Some(&self.host)
+    }
+
+    /// Return whether this URL has a host.
+    ///
+    /// Always `true` for HTTP/HTTPS URLs.
+    /// Equivalent to `url::Url::has_host()`.
+    pub fn has_host(&self) -> bool {
+        true
+    }
+
+    /// Return whether this URL has an authority component.
+    ///
+    /// Always `true` for HTTP/HTTPS URLs.
+    /// Equivalent to `url::Url::has_authority()`.
+    pub fn has_authority(&self) -> bool {
+        true
+    }
+
+    /// Return whether this URL cannot be a base.
+    ///
+    /// Always `false` for HTTP/HTTPS URLs.
+    /// Equivalent to `url::Url::cannot_be_a_base()`.
+    pub fn cannot_be_a_base(&self) -> bool {
+        false
+    }
+
+    /// Return an iterator over the path segments.
+    ///
+    /// Always `Some` for HTTP/HTTPS URLs (they cannot be
+    /// "cannot-be-a-base" URLs).
+    /// Equivalent to `url::Url::path_segments()`.
+    pub fn path_segments(&self) -> Option<std::str::Split<'_, char>> {
+        // Strip the leading '/' then split (matching url::Url behaviour
+        // which yields "" for the first empty segment rather than a
+        // leading empty string).
+        let path = self.path.strip_prefix('/').unwrap_or(&self.path);
+        Some(path.split('/'))
+    }
+
     /// Return the username component of the URL, if present.
     ///
     /// Returns `""` when no userinfo is present in the URL.
@@ -1448,6 +1501,46 @@ mod tests {
         let err = ParseError::UnsupportedScheme;
         let cloned = err.clone();
         assert_eq!(format!("{err:?}"), format!("{cloned:?}"));
+    }
+
+    // -- trivial accessors --
+
+    #[test]
+    fn url_trivial_accessors() {
+        let url = Url::parse("https://example.com").unwrap();
+        assert!(url.has_host());
+        assert!(url.has_authority());
+        assert!(!url.cannot_be_a_base());
+    }
+
+    #[test]
+    fn url_domain_table() {
+        let cases: &[(&str, Option<&str>)] = &[
+            ("https://example.com/path", Some("example.com")),
+            ("https://sub.example.co.uk", Some("sub.example.co.uk")),
+            ("https://127.0.0.1/path", None),
+            ("https://[::1]/path", None),
+            ("https://0.0.0.0", None),
+        ];
+        for &(input, expected) in cases {
+            let url = Url::parse(input).unwrap();
+            assert_eq!(url.domain(), expected, "domain() for {input}");
+        }
+    }
+
+    #[test]
+    fn url_path_segments_table() {
+        let cases: &[(&str, &[&str])] = &[
+            ("https://example.com/a/b/c", &["a", "b", "c"]),
+            ("https://example.com/", &[""]),
+            ("https://example.com/one", &["one"]),
+            ("https://example.com/a/b/", &["a", "b", ""]),
+        ];
+        for &(input, expected) in cases {
+            let url = Url::parse(input).unwrap();
+            let segs: Vec<&str> = url.path_segments().unwrap().collect();
+            assert_eq!(segs, expected, "path_segments() for {input}");
+        }
     }
 
     // -- From<Url> for String --
