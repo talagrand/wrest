@@ -6,6 +6,7 @@
 //! [`reqwest::Body`](https://docs.rs/reqwest/latest/reqwest/struct.Body.html)
 //! API surface.
 
+use crate::Response;
 use bytes::Bytes;
 use std::pin::Pin;
 
@@ -129,8 +130,9 @@ impl Body {
                 use futures_util::StreamExt;
                 let mut buf = Vec::new();
                 while let Some(chunk) = stream.next().await {
-                    let bytes = chunk
-                        .map_err(|e| crate::Error::body("stream body error").with_source(e))?;
+                    let bytes = chunk.map_err(|e| {
+                        crate::Error::body(crate::error::ContextError::new("stream body error", e))
+                    })?;
                     buf.extend_from_slice(&bytes);
                 }
                 Ok(buf)
@@ -193,8 +195,8 @@ impl Default for Body {
 /// A `Response` can be piped as the `Body` of another request.
 ///
 /// The response body is streamed -- it is not buffered into memory.
-impl From<crate::Response> for Body {
-    fn from(resp: crate::Response) -> Body {
+impl From<Response> for Body {
+    fn from(resp: Response) -> Body {
         Body::wrap_stream(resp.bytes_stream())
     }
 }

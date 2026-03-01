@@ -25,9 +25,8 @@
 //! instead decoded via a compile-time Rust lookup table in
 //! [`crate::encoding`].
 
+use crate::{Error, util::string_from_utf16};
 use std::sync::OnceLock;
-
-use crate::Error;
 use windows_sys::Win32::Globalization::MultiByteToWideChar;
 
 // ===========================================================================
@@ -76,7 +75,7 @@ pub(crate) fn multi_byte_to_string(codepage: u32, data: &[u8]) -> Result<String,
         }
         buf.set_len(written as usize);
 
-        crate::util::string_from_utf16(&buf, "UTF-16 conversion failed")
+        string_from_utf16(&buf, "UTF-16 conversion failed")
     }
 }
 
@@ -276,7 +275,7 @@ pub(crate) fn icu_decode(converter_name: &str, data: &[u8]) -> Result<String, Er
     let len = written.max(0) as usize;
     buf.truncate(len);
 
-    crate::util::string_from_utf16(&buf, "ICU produced invalid UTF-16")
+    string_from_utf16(&buf, "ICU produced invalid UTF-16")
 }
 
 // ---------------------------------------------------------------------------

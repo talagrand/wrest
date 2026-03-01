@@ -15,6 +15,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Consolidated examples from 7 to 4, removing `simple_get`, `concurrent`, and `streaming` (all subsumed by `whirl` and remaining examples).
 - `ClientBuilder::tls_danger_accept_invalid_certs()` alias for `danger_accept_invalid_certs()` to match reqwest 0.13.
 - Removed `ClientBuilder::no_trust_dns()` (removed in reqwest 0.12); use `no_hickory_dns()` instead. Breakage should be acceptable since we are tracking reqwest 0.13
+- Wrest errors now use `source` chain so callers that do source chain traversal in `reqwest` see the same Eorror "shape". `Error::source()` now always returns `Some` for non-status errors.
+- Performance: `Error` object size is now pointer-sized and errors are not greedily stringified.
 
 ### Fixed
 - Fixed `WinHttpSetCredentials` return value being silently discarded; proxy auth failures now propagate as errors instead of producing 407 responses.

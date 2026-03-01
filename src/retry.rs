@@ -28,16 +28,15 @@
 //! if the server cannot handle the same request twice or if it causes
 //! side effects.
 
-use std::sync::Arc;
-use std::time::Duration;
-
+use crate::{Error, Response, Url};
 use budget::Budget;
+use std::{sync::Arc, time::Duration};
 
 pub(crate) use classify::Action;
 use classify::ReqRep;
 
 type ClassifyFn = Arc<dyn for<'a> Fn(ReqRep<'a>) -> Action + Send + Sync>;
-type ScopeFn = Arc<dyn Fn(&crate::Url, &http::Method) -> bool + Send + Sync>;
+type ScopeFn = Arc<dyn Fn(&Url, &http::Method) -> bool + Send + Sync>;
 
 // ===== Public free functions ==========================================
 
@@ -46,7 +45,7 @@ pub fn for_host<S>(host: S) -> Builder
 where
     S: for<'a> PartialEq<&'a str> + Send + Sync + 'static,
 {
-    scoped(move |url: &crate::Url, _| host == url.host_str().unwrap_or(""))
+    scoped(move |url: &Url, _| host == url.host_str().unwrap_or(""))
 }
 
 /// Create a retry policy that will never retry any request.
@@ -59,7 +58,7 @@ pub fn never() -> Builder {
 
 fn scoped<F>(func: F) -> Builder
 where
-    F: Fn(&crate::Url, &http::Method) -> bool + Send + Sync + 'static,
+    F: Fn(&Url, &http::Method) -> bool + Send + Sync + 'static,
 {
     Builder::scoped(func)
 }
@@ -79,7 +78,7 @@ pub struct Builder {
 impl Builder {
     /// Create a scoped retry policy.
     pub(crate) fn scoped(
-        scope: impl Fn(&crate::Url, &http::Method) -> bool + Send + Sync + 'static,
+        scope: impl Fn(&Url, &http::Method) -> bool + Send + Sync + 'static,
     ) -> Self {
         Self {
             budget: Some(0.2),
@@ -207,9 +206,9 @@ impl Policy {
     /// Classify whether a request result should be retried.
     pub(crate) fn classify_result(
         &self,
-        url: &crate::Url,
+        url: &Url,
         method: &http::Method,
-        result: &Result<crate::Response, crate::Error>,
+        result: &Result<Response, Error>,
     ) -> Action {
         // Check scope first — if the request isn't in scope, don't retry.
         if let Some(ref scope) = self.scope
@@ -430,6 +429,8 @@ mod budget {
 // ===== Classification =================================================
 
 mod classify {
+    use super::{Error, Response, Url};
+
     /// A request/response pair for classification.
     ///
     /// Received by closures passed to [`super::Builder::classify_fn()`].  Helper
@@ -440,14 +441,14 @@ mod classify {
     pub struct ReqRep<'a> {
         uri: http::Uri,
         method: &'a http::Method,
-        result: Result<http::StatusCode, &'a crate::Error>,
+        result: Result<http::StatusCode, &'a Error>,
     }
 
     impl<'a> ReqRep<'a> {
         pub(super) fn new(
-            url: &crate::Url,
+            url: &Url,
             method: &'a http::Method,
-            result: &'a Result<crate::Response, crate::Error>,
+            result: &'a Result<Response, Error>,
         ) -> Result<Self, http::Error> {
             Ok(Self {
                 uri: url.to_http_uri()?,
@@ -586,7 +587,7 @@ mod tests {
         ];
 
         for &(url_str, expected, desc) in cases {
-            let url: crate::Url = url_str.parse().unwrap();
+            let url: Url = url_str.parse().unwrap();
             assert_eq!(scope(&url, &http::Method::GET), expected, "{desc}");
         }
     }
@@ -639,16 +640,16 @@ mod tests {
             .no_budget()
             .into_policy();
 
-        type RequestResult = Result<crate::Response, crate::Error>;
+        type RequestResult = Result<Response, Error>;
 
-        let err: RequestResult = Err(crate::Error::builder("test"));
+        let err: RequestResult = Err(Error::builder("test"));
 
         // A synthetic connection-reset error to exercise the default classifier's
         // Retryable branch.
-        let conn_reset_err: RequestResult = Err(crate::Error::request("connection reset")
-            .with_source(std::io::Error::from(std::io::ErrorKind::ConnectionReset)));
+        let conn_reset_err: RequestResult =
+            Err(Error::request(std::io::Error::from(std::io::ErrorKind::ConnectionReset)));
 
-        let resp_503: RequestResult = Ok(crate::Response::synthetic(
+        let resp_503: RequestResult = Ok(Response::synthetic(
             http::StatusCode::SERVICE_UNAVAILABLE,
             "https://example.com/api",
         ));
@@ -701,7 +702,7 @@ mod tests {
         ];
 
         for (policy, url_str, result, expected, desc) in cases {
-            let url: crate::Url = url_str.parse().unwrap();
+            let url: Url = url_str.parse().unwrap();
             let action = policy.classify_result(&url, &http::Method::GET, result);
             assert_eq!(action, *expected, "{desc}");
         }
@@ -775,8 +776,8 @@ mod tests {
             })
             .into_policy();
 
-        let url: crate::Url = "https://example.com/api".parse().unwrap();
-        let result: Result<crate::Response, crate::Error> = Err(crate::Error::builder("test"));
+        let url: Url = "https://example.com/api".parse().unwrap();
+        let result: Result<Response, Error> = Err(Error::builder("test"));
         assert_eq!(policy.classify_result(&url, &http::Method::POST, &result), Action::Retryable,);
     }
 

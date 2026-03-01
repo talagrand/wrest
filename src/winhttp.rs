@@ -4,19 +4,25 @@
 //! WinHTTP. It is entirely `pub(crate)` -- the public API is in [`client`],
 //! [`request`], and [`response`].
 
-use crate::abi;
-use crate::callback::{
-    CompletionSignal, SignalCancelled, await_win32, borrow_context_ptr, leak_context_ptr,
-    reclaim_context_ptr,
+use crate::{
+    Body, abi,
+    body::BodyInner,
+    callback::{
+        CompletionSignal, SignalCancelled, await_win32, borrow_context_ptr, leak_context_ptr,
+        reclaim_context_ptr,
+    },
+    error::{ContextError, Error},
+    proxy::{ProxyAction, ProxyConfig},
+    redirect::{self, Policy},
+    url::Url,
+    util::lock_or_clear,
 };
-use crate::error::Error;
-use crate::proxy::{ProxyAction, ProxyConfig};
-use crate::url::Url;
-use crate::util::lock_or_clear;
 use bytes::BytesMut;
 use http::{StatusCode, Version};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU32, Ordering},
+};
 use windows_sys::Win32::Networking::WinHttp::*;
 
 // ---------------------------------------------------------------------------
@@ -347,7 +353,7 @@ pub(crate) struct SessionConfig {
     pub verbose: bool,
     pub max_connections_per_host: Option<u32>,
     pub proxy: ProxyAction,
-    pub redirect_policy: Option<crate::redirect::Policy>,
+    pub redirect_policy: Option<Policy>,
     pub http1_only: bool,
 }
 
@@ -439,14 +445,14 @@ impl WinHttpSession {
         // Apply redirect policy
         match &config.redirect_policy {
             Some(policy) => match &policy.inner {
-                crate::redirect::PolicyInner::None => {
+                redirect::PolicyInner::None => {
                     abi::winhttp_set_option_u32(
                         session.0,
                         WINHTTP_OPTION_REDIRECT_POLICY,
                         WINHTTP_OPTION_REDIRECT_POLICY_NEVER,
                     )?;
                 }
-                crate::redirect::PolicyInner::Limited(max) => {
+                redirect::PolicyInner::Limited(max) => {
                     abi::winhttp_set_option_u32(
                         session.0,
                         WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS,
@@ -500,12 +506,10 @@ pub(crate) async fn execute_request(
     url: &Url,
     method: &str,
     headers: &[(String, String)],
-    body: Option<crate::Body>,
+    body: Option<Body>,
     proxy_config: &ProxyConfig,
     accept_invalid_certs: bool,
 ) -> Result<RawResponse, Error> {
-    use crate::body::BodyInner;
-
     // Check per-request NO_PROXY override
     let per_request_proxy = proxy_config.resolve(&url.host, url.is_https);
 
@@ -691,9 +695,7 @@ pub(crate) async fn execute_request(
             let chunk = chunk_result.map_err(|e| {
                 // Classified as Request (not Body) to match reqwest: this is a
                 // send-phase failure, not a response-body-read failure.
-                Error::request("stream body error")
-                    .with_source(e)
-                    .with_url(url.clone())
+                Error::request(ContextError::new("stream body error", e)).with_url(url.clone())
             })?;
 
             if chunk.is_empty() {
@@ -943,11 +945,11 @@ pub(crate) async fn read_chunk(
             .with_url(url.clone()));
     };
     if (read as usize) > buf.capacity() {
-        return Err(Error::request(format!(
+        Err(Error::request(format!(
             "WinHTTP reported {read} bytes read but buffer capacity is {} (invariant violated)",
             buf.capacity(),
         ))
-        .with_url(url.clone()));
+        .with_url(url.clone()))
     } else {
         // SAFETY: `buf` was allocated with `BytesMut::with_capacity(to_read)`
         // and passed to `WinHttpReadData` which wrote exactly `read` bytes.
@@ -1006,8 +1008,7 @@ fn query_status_code(h_request: *mut core::ffi::c_void, url: &Url) -> Result<Sta
     .url_context(url)?;
 
     StatusCode::from_u16(status_code as u16).map_err(|e| {
-        Error::request(format!("invalid status code: {status_code}"))
-            .with_source(e)
+        Error::request(ContextError::new(format!("invalid status code: {status_code}"), e))
             .with_url(url.clone())
     })
 }
@@ -1065,14 +1066,17 @@ fn resolve_version(protocol_flags: Option<u32>, version_str: Option<&str>) -> Ve
 /// Create an Error from a WinHTTP callback error, enriching with TLS details.
 fn callback_error_to_error(code: u32, state: &RequestState, url: &Url) -> Error {
     let mut err = Error::from_win32(code);
-    err.url = Some(Box::new(url.clone()));
+    err.inner.url = Some(Box::new(url.clone()));
 
     // Enrich TLS errors with captured failure flags
     if code == ERROR_WINHTTP_SECURE_FAILURE {
         // Acquire: pairs with the Release store in the SECURE_FAILURE callback.
         let tls_flags = state.tls_failure_flags.load(Ordering::Acquire);
         let detail = describe_tls_failure(tls_flags);
-        err.message = format!("TLS error: {detail}");
+        if let Some(source) = err.inner.source.take() {
+            err.inner.source =
+                Some(Box::new(ContextError::new(format!("TLS error: {detail}"), source)));
+        }
     }
 
     err
@@ -1111,7 +1115,7 @@ fn describe_tls_failure(flags: u32) -> String {
 
 impl From<SignalCancelled> for Error {
     fn from(sc: SignalCancelled) -> Self {
-        Error::request("operation cancelled").with_source(sc)
+        Error::request(sc)
     }
 }
 
@@ -1162,7 +1166,7 @@ mod tests {
         let proxy_config = ProxyConfig::none();
 
         // 5 MiB body -- exceeds the 4 MiB #[cfg(test)] threshold.
-        let body = crate::Body::from(vec![b'X'; 5 * 1024 * 1024]);
+        let body = Body::from(vec![b'X'; 5 * 1024 * 1024]);
 
         let raw = execute_request(&session, &url, "POST", &[], Some(body), &proxy_config, false)
             .await
@@ -1189,7 +1193,7 @@ mod tests {
         struct Case {
             label: &'static str,
             proxy: ProxyAction,
-            redirect_policy: Option<crate::redirect::Policy>,
+            redirect_policy: Option<Policy>,
             src_path: &'static str,
             redirect_to: Option<&'static str>,
             dst_path: Option<&'static str>,
@@ -1209,7 +1213,7 @@ mod tests {
             Case {
                 label: "Policy::none() → 302 returned as-is",
                 proxy: ProxyAction::Automatic,
-                redirect_policy: Some(crate::redirect::Policy::none()),
+                redirect_policy: Some(Policy::none()),
                 src_path: "/rp-src",
                 redirect_to: Some("/rp-dst"),
                 dst_path: None, // not mounted -- redirect should NOT be followed
@@ -1218,7 +1222,7 @@ mod tests {
             Case {
                 label: "Policy::limited(5) → redirect followed",
                 proxy: ProxyAction::Automatic,
-                redirect_policy: Some(crate::redirect::Policy::limited(5)),
+                redirect_policy: Some(Policy::limited(5)),
                 src_path: "/lim-src",
                 redirect_to: Some("/lim-dst"),
                 dst_path: Some("/lim-dst"),
@@ -1467,9 +1471,10 @@ mod tests {
     fn signal_cancelled_into_error() {
         let err: Error = SignalCancelled.into();
         assert!(err.is_request());
-        // Display shows kind prefix; "cancelled" detail is in Debug.
+        // Display shows kind prefix; "cancelled" detail is in the source chain.
         assert_eq!(err.to_string(), "error sending request");
-        assert!(format!("{err:?}").contains("cancelled"));
+        let source = std::error::Error::source(&err).expect("should have source");
+        assert!(source.to_string().contains("cancelled"));
     }
 
     // -- Additional error path coverage --

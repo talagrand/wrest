@@ -13,12 +13,13 @@
 //! **Executor-agnostic** -- uses `futures_channel::oneshot`, works on tokio, async-std,
 //! or bare `block_on`.
 
-use futures_channel::oneshot;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
-
 use crate::util::lock_or_clear;
+use futures_channel::oneshot;
+use std::{
+    pin::Pin,
+    sync::{Arc, Mutex},
+    task::{Context, Poll},
+};
 
 // ---------------------------------------------------------------------------
 // CallbackContext -- safe Arc <-> usize lifecycle

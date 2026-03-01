@@ -8,8 +8,7 @@
 
 use crate::url::Url;
 use http::StatusCode;
-use std::fmt;
-use std::io;
+use std::{borrow::Cow, fmt, io};
 use windows_sys::Win32::Networking::WinHttp::*;
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -24,8 +23,11 @@ pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// When a request URL is available, it is included in the `Display` output
 /// for diagnostics and telemetry.
 pub struct Error {
+    pub(crate) inner: Box<InnerError>,
+}
+
+pub(crate) struct InnerError {
     pub(crate) kind: ErrorKind,
-    pub(crate) message: String,
     pub(crate) source: Option<BoxError>,
     pub(crate) status: Option<StatusCode>,
     pub(crate) url: Option<Box<Url>>,
@@ -63,7 +65,7 @@ pub(crate) enum ErrorKind {
 impl Error {
     /// Returns `true` if this is a builder error.
     pub fn is_builder(&self) -> bool {
-        matches!(self.kind, ErrorKind::Builder)
+        matches!(self.inner.kind, ErrorKind::Builder)
     }
 
     /// Returns `true` if this is a connection error.
@@ -71,28 +73,28 @@ impl Error {
     /// Connection errors include DNS resolution failures, TCP connection
     /// refused, and TLS handshake failures -- matching `reqwest::Error::is_connect()`.
     pub fn is_connect(&self) -> bool {
-        matches!(self.kind, ErrorKind::Connect)
+        matches!(self.inner.kind, ErrorKind::Connect)
     }
 
     /// Returns `true` if this is a timeout error.
     pub fn is_timeout(&self) -> bool {
-        matches!(self.kind, ErrorKind::Timeout)
+        matches!(self.inner.kind, ErrorKind::Timeout)
     }
 
     /// Returns `true` if this error was produced by
     /// [`Response::error_for_status`](crate::Response::error_for_status).
     pub fn is_status(&self) -> bool {
-        matches!(self.kind, ErrorKind::Status)
+        matches!(self.inner.kind, ErrorKind::Status)
     }
 
     /// Returns `true` if this is a request-phase error.
     pub fn is_request(&self) -> bool {
-        matches!(self.kind, ErrorKind::Request)
+        matches!(self.inner.kind, ErrorKind::Request)
     }
 
     /// Returns `true` if this is a body-reading error.
     pub fn is_body(&self) -> bool {
-        matches!(self.kind, ErrorKind::Body)
+        matches!(self.inner.kind, ErrorKind::Body)
     }
 
     /// Returns `true` if this is a redirect error.
@@ -100,7 +102,7 @@ impl Error {
     /// This is set when WinHTTP reports `ERROR_WINHTTP_REDIRECT_FAILED`,
     /// e.g. because the redirect limit was exceeded.
     pub fn is_redirect(&self) -> bool {
-        matches!(self.kind, ErrorKind::Redirect)
+        matches!(self.inner.kind, ErrorKind::Redirect)
     }
 
     /// Returns `true` if this is a response body decoding error.
@@ -109,7 +111,7 @@ impl Error {
     /// `Response::json()`) and charset
     /// conversion errors (from [`Response::text()`](crate::Response::text)).
     pub fn is_decode(&self) -> bool {
-        matches!(self.kind, ErrorKind::Decode)
+        matches!(self.inner.kind, ErrorKind::Decode)
     }
 
     /// Returns `true` if this is an upgrade error.
@@ -121,7 +123,7 @@ impl Error {
     /// feature.
     #[cfg(feature = "noop-compat")]
     pub fn is_upgrade(&self) -> bool {
-        matches!(self.kind, ErrorKind::Upgrade)
+        matches!(self.inner.kind, ErrorKind::Upgrade)
     }
 
     /// Returns `true` if the underlying I/O error is a connection reset.
@@ -149,77 +151,62 @@ impl Error {
     /// Returns the HTTP status code, if this error was produced by
     /// [`Response::error_for_status`](crate::Response::error_for_status).
     pub fn status(&self) -> Option<StatusCode> {
-        self.status
+        self.inner.status
     }
 
     /// Returns the request URL associated with this error, if available.
     pub fn url(&self) -> Option<&Url> {
-        self.url.as_deref()
+        self.inner.url.as_deref()
     }
 
     /// Returns a mutable reference to the request URL associated with
     /// this error, if available.
     pub fn url_mut(&mut self) -> Option<&mut Url> {
-        self.url.as_deref_mut()
+        self.inner.url.as_deref_mut()
     }
 
     /// Strips the URL from this error, returning the error without a URL.
     #[must_use]
     pub fn without_url(mut self) -> Self {
-        self.url = None;
+        self.inner.url = None;
         self
     }
 
     /// Attach a request URL to this error (builder pattern).
     #[must_use]
     pub fn with_url(mut self, url: Url) -> Self {
-        self.url = Some(Box::new(url));
-        self
-    }
-
-    /// Attach a source error (builder pattern).
-    ///
-    /// Stores the underlying cause so that
-    /// [`std::error::Error::source`] returns it, making error chains
-    /// inspectable by `anyhow`, `eyre`, and manual walks.
-    #[must_use]
-    pub(crate) fn with_source(mut self, source: impl Into<BoxError>) -> Self {
-        self.source = Some(source.into());
+        self.inner.url = Some(Box::new(url));
         self
     }
 
     // -- Internal constructors --
 
     /// Shared constructor for simple error kinds (no source, no status, no URL).
-    fn with_kind(kind: ErrorKind, msg: impl Into<String>) -> Self {
+    fn with_kind(kind: ErrorKind, source: impl Into<BoxError>) -> Self {
         Self {
-            kind,
-            message: msg.into(),
-            source: None,
-            status: None,
-            url: None,
+            inner: Box::new(InnerError {
+                kind,
+                source: Some(source.into()),
+                status: None,
+                url: None,
+            }),
         }
     }
 
     /// Create a builder-phase error.
-    pub(crate) fn builder(msg: impl Into<String>) -> Self {
-        Self::with_kind(ErrorKind::Builder, msg)
+    pub(crate) fn builder(source: impl Into<BoxError>) -> Self {
+        Self::with_kind(ErrorKind::Builder, source)
     }
 
     /// Create a status error for a failed HTTP status code.
-    pub(crate) fn status_error(code: StatusCode, url: crate::Url) -> Self {
-        let prefix = if code.is_client_error() {
-            "HTTP status client error"
-        } else {
-            "HTTP status server error"
-        };
-        let reason = code.canonical_reason().unwrap_or("<unknown status code>");
+    pub(crate) fn status_error(code: StatusCode, url: Url) -> Self {
         Self {
-            kind: ErrorKind::Status,
-            message: format!("{prefix} ({} {reason})", code.as_str()),
-            source: None,
-            status: Some(code),
-            url: Some(Box::new(url)),
+            inner: Box::new(InnerError {
+                kind: ErrorKind::Status,
+                source: None,
+                status: Some(code),
+                url: Some(Box::new(url)),
+            }),
         }
     }
 
@@ -231,34 +218,34 @@ impl Error {
     /// `TimedOut`).
     pub(crate) fn from_win32(code: u32) -> Self {
         let kind = error_kind_from_win32(code);
-        let message = format!("WinHTTP error {code}");
         Self {
-            kind,
-            message,
-            source: Some(Box::new(io_error_from_winhttp(code))),
-            status: None,
-            url: None,
+            inner: Box::new(InnerError {
+                kind,
+                source: Some(Box::new(io_error_from_winhttp(code))),
+                status: None,
+                url: None,
+            }),
         }
     }
 
     /// Create a timeout error.
-    pub(crate) fn timeout(msg: impl Into<String>) -> Self {
-        Self::with_kind(ErrorKind::Timeout, msg)
+    pub(crate) fn timeout(source: impl Into<BoxError>) -> Self {
+        Self::with_kind(ErrorKind::Timeout, source)
     }
 
     /// Create a body-reading error.
-    pub(crate) fn body(msg: impl Into<String>) -> Self {
-        Self::with_kind(ErrorKind::Body, msg)
+    pub(crate) fn body(source: impl Into<BoxError>) -> Self {
+        Self::with_kind(ErrorKind::Body, source)
     }
 
     /// Create a decode error (JSON deserialization, charset conversion).
-    pub(crate) fn decode(msg: impl Into<String>) -> Self {
-        Self::with_kind(ErrorKind::Decode, msg)
+    pub(crate) fn decode(source: impl Into<BoxError>) -> Self {
+        Self::with_kind(ErrorKind::Decode, source)
     }
 
     /// Create a request-phase error.
-    pub(crate) fn request(msg: impl Into<String>) -> Self {
-        Self::with_kind(ErrorKind::Request, msg)
+    pub(crate) fn request(source: impl Into<BoxError>) -> Self {
+        Self::with_kind(ErrorKind::Request, source)
     }
 }
 
@@ -267,7 +254,7 @@ impl fmt::Display for Error {
     /// ` for url (...)` when the URL is known.  The source error
     /// detail is available via [`std::error::Error::source`].
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.kind {
+        match self.inner.kind {
             ErrorKind::Builder => f.write_str("builder error")?,
             ErrorKind::Request => f.write_str("error sending request")?,
             ErrorKind::Body => f.write_str("request or response body error")?,
@@ -277,11 +264,21 @@ impl fmt::Display for Error {
             ErrorKind::Timeout => f.write_str("operation timed out")?,
             ErrorKind::Status => {
                 // Matches reqwest: "HTTP status client error (404 Not Found)"
-                write!(f, "{}", self.message)?;
+                if let Some(code) = self.inner.status {
+                    let prefix = if code.is_client_error() {
+                        "HTTP status client error"
+                    } else {
+                        "HTTP status server error"
+                    };
+                    let reason = code.canonical_reason().unwrap_or("<unknown status code>");
+                    write!(f, "{prefix} ({} {reason})", code.as_str())?;
+                } else {
+                    f.write_str("HTTP status error")?;
+                }
             }
             ErrorKind::Upgrade => f.write_str("error upgrading connection")?,
         }
-        if let Some(url) = &self.url {
+        if let Some(url) = &self.inner.url {
             write!(f, " for url ({url})")?;
         }
         Ok(())
@@ -291,18 +288,18 @@ impl fmt::Display for Error {
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Error")
-            .field("kind", &self.kind)
-            .field("message", &self.message)
-            .field("url", &self.url)
-            .field("status", &self.status)
-            .field("source", &self.source)
+            .field("kind", &self.inner.kind)
+            .field("url", &self.inner.url)
+            .field("status", &self.inner.status)
+            .field("source", &self.inner.source)
             .finish()
     }
 }
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source
+        self.inner
+            .source
             .as_ref()
             .map(|e| &**e as &(dyn std::error::Error + 'static))
     }
@@ -351,6 +348,38 @@ const _: () = {
     assert_send_sync::<Error>();
 };
 
+/// Source error that pairs a context message with an underlying cause.
+///
+/// `Display` shows the context string; `source()` chains to the
+/// wrapped error.  Used anywhere wrest adds diagnostic context beyond
+/// what the underlying error's own `Display` provides.
+#[derive(Debug)]
+pub(crate) struct ContextError {
+    context: Cow<'static, str>,
+    source: BoxError,
+}
+
+impl ContextError {
+    pub(crate) fn new(context: impl Into<Cow<'static, str>>, source: impl Into<BoxError>) -> Self {
+        Self {
+            context: context.into(),
+            source: source.into(),
+        }
+    }
+}
+
+impl fmt::Display for ContextError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.context)
+    }
+}
+
+impl std::error::Error for ContextError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&*self.source)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,28 +389,29 @@ mod tests {
     #[test]
     fn error_display_format() {
         // Display uses kind-based prefixes matching reqwest::Error.
-        // The `message` field is only used for Status errors where it
-        // carries the "HTTP status {client,server} error (CODE REASON)" text.
+        // Status errors format from the status code directly.
         let cases: Vec<(&str, Error, &str)> = vec![
             (
                 "connect_with_url",
                 Error {
-                    kind: ErrorKind::Connect,
-                    message: "connection refused".into(),
-                    source: None,
-                    status: None,
-                    url: Some(Box::new("https://example.com".into_url().unwrap())),
+                    inner: Box::new(InnerError {
+                        kind: ErrorKind::Connect,
+                        source: None,
+                        status: None,
+                        url: Some(Box::new("https://example.com".into_url().unwrap())),
+                    }),
                 },
                 "error trying to connect for url (https://example.com/)",
             ),
             (
                 "timeout_no_url",
                 Error {
-                    kind: ErrorKind::Timeout,
-                    message: "operation timed out".into(),
-                    source: None,
-                    status: None,
-                    url: None,
+                    inner: Box::new(InnerError {
+                        kind: ErrorKind::Timeout,
+                        source: None,
+                        status: None,
+                        url: None,
+                    }),
                 },
                 "operation timed out",
             ),
@@ -392,34 +422,29 @@ mod tests {
             (
                 "upgrade",
                 Error {
-                    kind: ErrorKind::Upgrade,
-                    message: String::new(),
-                    source: None,
-                    status: None,
-                    url: None,
+                    inner: Box::new(InnerError {
+                        kind: ErrorKind::Upgrade,
+                        source: None,
+                        status: None,
+                        url: None,
+                    }),
                 },
                 "error upgrading connection",
             ),
             (
                 "status_client",
-                Error {
-                    kind: ErrorKind::Status,
-                    message: "HTTP status client error (404 Not Found)".into(),
-                    source: None,
-                    status: Some(StatusCode::NOT_FOUND),
-                    url: Some(Box::new("https://example.com/missing".into_url().unwrap())),
-                },
+                Error::status_error(
+                    StatusCode::NOT_FOUND,
+                    "https://example.com/missing".into_url().unwrap(),
+                ),
                 "HTTP status client error (404 Not Found) for url (https://example.com/missing)",
             ),
             (
                 "status_server",
-                Error {
-                    kind: ErrorKind::Status,
-                    message: "HTTP status server error (500 Internal Server Error)".into(),
-                    source: None,
-                    status: Some(StatusCode::INTERNAL_SERVER_ERROR),
-                    url: Some(Box::new("https://example.com/fail".into_url().unwrap())),
-                },
+                Error::status_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "https://example.com/fail".into_url().unwrap(),
+                ),
                 "HTTP status server error (500 Internal Server Error) for url (https://example.com/fail)",
             ),
         ];
@@ -446,33 +471,36 @@ mod tests {
             (Error::decode("d"), Error::is_decode, "decode"),
             (
                 Error {
-                    kind: ErrorKind::Connect,
-                    message: "c".into(),
-                    source: None,
-                    status: None,
-                    url: None,
+                    inner: Box::new(InnerError {
+                        kind: ErrorKind::Connect,
+                        source: None,
+                        status: None,
+                        url: None,
+                    }),
                 },
                 Error::is_connect,
                 "connect",
             ),
             (
                 Error {
-                    kind: ErrorKind::Status,
-                    message: "s".into(),
-                    source: None,
-                    status: Some(StatusCode::NOT_FOUND),
-                    url: Some(Box::new("https://example.com/missing".into_url().unwrap())),
+                    inner: Box::new(InnerError {
+                        kind: ErrorKind::Status,
+                        source: None,
+                        status: Some(StatusCode::NOT_FOUND),
+                        url: Some(Box::new("https://example.com/missing".into_url().unwrap())),
+                    }),
                 },
                 Error::is_status,
                 "status",
             ),
             (
                 Error {
-                    kind: ErrorKind::Redirect,
-                    message: "r".into(),
-                    source: None,
-                    status: None,
-                    url: None,
+                    inner: Box::new(InnerError {
+                        kind: ErrorKind::Redirect,
+                        source: None,
+                        status: None,
+                        url: None,
+                    }),
                 },
                 Error::is_redirect,
                 "redirect",
@@ -484,11 +512,12 @@ mod tests {
             let mut v = cases;
             v.push((
                 Error {
-                    kind: ErrorKind::Upgrade,
-                    message: "u".into(),
-                    source: None,
-                    status: None,
-                    url: None,
+                    inner: Box::new(InnerError {
+                        kind: ErrorKind::Upgrade,
+                        source: None,
+                        status: None,
+                        url: None,
+                    }),
                 },
                 Error::is_upgrade as fn(&Error) -> bool,
                 "upgrade",
@@ -520,9 +549,11 @@ mod tests {
     }
 
     #[test]
-    fn error_is_send_sync() {
+    fn error_type_properties() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Error>();
+
+        assert_eq!(std::mem::size_of::<Error>(), std::mem::size_of::<usize>());
     }
 
     #[test]
@@ -530,9 +561,14 @@ mod tests {
         let url = "https://example.com/api".into_url().unwrap();
         let err = Error::request("something failed").with_url(url);
         assert_eq!(err.url().map(|u| u.as_str()), Some("https://example.com/api"));
-        // Display uses kind-based prefix; detail is in the Debug/message field.
+        // Display uses kind-based prefix; detail is in the source chain.
         assert_eq!(err.to_string(), "error sending request for url (https://example.com/api)");
-        assert!(format!("{err:?}").contains("something failed"));
+        // Source chain contains the detail string.
+        assert!(
+            std::error::Error::source(&err)
+                .map(|s| s.to_string().contains("something failed"))
+                .unwrap()
+        );
     }
 
     #[test]
@@ -540,14 +576,8 @@ mod tests {
         let err = Error::builder("bad config");
         let debug = format!("{err:?}");
         assert!(debug.contains("Builder"));
+        // Detail string is in the source chain, visible in Debug.
         assert!(debug.contains("bad config"));
-    }
-
-    #[test]
-    fn error_std_error_source() {
-        let inner = std::io::Error::other("inner");
-        let err = Error::body("read failed").with_source(inner);
-        assert!(StdError::source(&err).is_some());
     }
 
     #[test]
@@ -569,9 +599,10 @@ mod tests {
     #[test]
     fn decode_error_message() {
         let err = Error::decode("JSON deserialization failed");
-        // Display shows kind prefix; detail is in Debug.
+        // Display shows kind prefix; detail is in the source chain.
         assert_eq!(err.to_string(), "error decoding response body");
-        assert!(format!("{err:?}").contains("JSON deserialization failed"));
+        let source = StdError::source(&err).expect("should have source");
+        assert_eq!(source.to_string(), "JSON deserialization failed");
     }
 
     #[test]
@@ -597,8 +628,9 @@ mod tests {
         assert!(err.url().is_none());
         // Display uses kind prefix; URL is stripped.
         assert_eq!(err.to_string(), "error sending request");
-        // Message preserved in Debug.
-        assert!(format!("{err:?}").contains("fail"));
+        // Detail preserved in source chain.
+        let source = StdError::source(&err).expect("should have source");
+        assert_eq!(source.to_string(), "fail");
     }
 
     // NOTE: `with_url` public API is already exercised by `error_with_url_builder`
@@ -647,13 +679,6 @@ mod tests {
                 "{label}: Display should not contain raw code"
             );
 
-            // Debug: includes "WinHTTP error <code>" for diagnostics
-            let debug = format!("{err:?}");
-            assert!(
-                debug.contains(&format!("WinHTTP error {code}")),
-                "{label}: Debug should contain code: {debug}"
-            );
-
             // Source chain: always an io::Error
             let source =
                 StdError::source(&err).unwrap_or_else(|| panic!("{label}: should have source"));
@@ -668,12 +693,17 @@ mod tests {
         }
     }
 
-    /// Source errors stored via `with_source()` are accessible through
-    /// the standard `Error::source()` chain and can be downcast.
+    /// Constructor sources are accessible through the standard
+    /// `Error::source()` chain and can be downcast to the original type.
     #[test]
-    fn with_source_downcast() {
+    fn source_downcast() {
+        // String source is present.
+        let err = Error::body("read failed");
+        assert!(StdError::source(&err).is_some());
+
+        // Typed source is downcastable.
         let inner = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe");
-        let err = Error::body("read failed").with_source(inner);
+        let err = Error::body(inner);
 
         let source = StdError::source(&err).expect("should have source");
         let io_err = source
