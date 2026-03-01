@@ -4,14 +4,19 @@
 //! configure timeouts and options, then call [`.build()`](ClientBuilder::build).
 //! `Client` is cheap to clone (`Arc` internally).
 
-use crate::error::Error;
-use crate::proxy::ProxyConfig;
-use crate::request::RequestBuilder;
-use crate::url::IntoUrl;
-use crate::winhttp::{self, SessionConfig, WinHttpSession};
+use crate::{
+    Body, Response, Url,
+    error::{ContextError, Error},
+    proxy::{self, ProxyConfig},
+    redirect,
+    request::{self, RequestBuilder},
+    retry,
+    url::IntoUrl,
+    util,
+    winhttp::{self, SessionConfig, WinHttpSession},
+};
 use http::{HeaderMap, HeaderValue};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 /// An async HTTP client backed by WinHTTP.
 ///
@@ -55,7 +60,7 @@ pub(crate) struct ClientInner {
     /// Whether to restrict requests to HTTPS-only.
     pub https_only: bool,
     /// Retry policy for automatically retrying failed requests.
-    pub retry_policy: crate::retry::Policy,
+    pub retry_policy: retry::Policy,
 }
 
 /// Builder for configuring and constructing a [`Client`].
@@ -72,12 +77,12 @@ pub struct ClientBuilder {
     max_connections_per_host: Option<u32>,
     proxy_config: Option<ProxyConfig>,
     default_headers: HeaderMap,
-    redirect_policy: Option<crate::redirect::Policy>,
+    redirect_policy: Option<redirect::Policy>,
     tls_danger_accept_invalid_certs: bool,
     https_only: bool,
     http1_only: bool,
     error: Option<Error>,
-    retry_policy: Option<crate::retry::Builder>,
+    retry_policy: Option<retry::Builder>,
 }
 
 impl Client {
@@ -143,11 +148,8 @@ impl Client {
     /// [`RequestBuilder::send()`](crate::RequestBuilder::send).
     /// Build a request with [`RequestBuilder::build()`](crate::RequestBuilder::build),
     /// inspect or modify it, then execute it here.
-    pub async fn execute(
-        &self,
-        request: crate::request::Request,
-    ) -> Result<crate::Response, Error> {
-        use crate::retry::Action;
+    pub async fn execute(&self, request: request::Request) -> Result<Response, Error> {
+        use retry::Action;
 
         let policy = &self.inner.retry_policy;
 
@@ -155,7 +157,7 @@ impl Client {
         // regardless of which exit path is taken (success, error, or panic).
         // The budget tracks throughput (requests we chose not to retry).
         struct DepositGuard<'a> {
-            policy: &'a crate::retry::Policy,
+            policy: &'a retry::Policy,
         }
         impl<'a> Drop for DepositGuard<'a> {
             fn drop(&mut self) {
@@ -176,9 +178,7 @@ impl Client {
         // via Latin-1 identity mapping for a lossless round-trip.
         let headers: Vec<(String, String)> = headers_map
             .iter()
-            .map(|(name, value)| {
-                (name.as_str().to_owned(), crate::util::widen_latin1(value.as_bytes()))
-            })
+            .map(|(name, value)| (name.as_str().to_owned(), util::widen_latin1(value.as_bytes())))
             .collect();
 
         // Calculate the absolute deadline for the entire request lifecycle (including retries).
@@ -248,19 +248,17 @@ impl Client {
     /// Inner execution — a single request attempt (no retry logic).
     async fn execute_inner(
         &self,
-        url: &crate::Url,
+        url: &Url,
         method_str: &str,
         headers: &[(String, String)],
-        body: Option<crate::Body>,
+        body: Option<Body>,
         deadline: Option<std::time::Instant>,
-    ) -> Result<crate::Response, Error> {
+    ) -> Result<Response, Error> {
         let inner = &self.inner;
 
         // Reject http:// URLs when https_only is enabled.
         if inner.https_only && !url.is_https {
-            return Err(Error::builder(
-                "HTTPS required but got an HTTP URL",
-            ).with_url(url.clone()));
+            return Err(Error::builder("URL scheme is not allowed").with_url(url.clone()));
         }
 
         // Calculate remaining time for this attempt
@@ -314,7 +312,7 @@ impl Client {
             send_future.await?
         };
 
-        Ok(crate::Response::from_raw(raw, deadline, self.clone()))
+        Ok(Response::from_raw(raw, deadline, self.clone()))
     }
 }
 
@@ -460,12 +458,13 @@ impl ClientBuilder {
             Ok(v) => match v.to_str() {
                 Ok(s) => self.user_agent = s.to_owned(),
                 Err(e) => {
-                    self.error = Some(Error::builder("invalid user-agent value").with_source(e));
+                    self.error =
+                        Some(Error::builder(ContextError::new("invalid user-agent value", e)));
                 }
             },
             Err(e) => {
                 let e: http::Error = e.into();
-                self.error = Some(Error::builder("invalid user-agent").with_source(e));
+                self.error = Some(Error::builder(ContextError::new("invalid user-agent", e)));
             }
         }
         self
@@ -854,7 +853,7 @@ impl ClientBuilder {
     /// reqwest's `Policy::custom()` callback is not available because
     /// redirect handling is performed by WinHTTP internally.
     #[must_use]
-    pub fn redirect(mut self, policy: crate::redirect::Policy) -> Self {
+    pub fn redirect(mut self, policy: redirect::Policy) -> Self {
         self.redirect_policy = Some(policy);
         self
     }
@@ -870,7 +869,7 @@ impl ClientBuilder {
     /// WinHTTP only supports HTTP CONNECT proxies. reqwest supports
     /// SOCKS via the `socks` feature.
     #[must_use]
-    pub fn proxy(mut self, proxy: crate::proxy::Proxy) -> Self {
+    pub fn proxy(mut self, proxy: proxy::Proxy) -> Self {
         let config = self.proxy_config.get_or_insert_with(ProxyConfig::from_env);
         proxy.apply_to(config);
         self
@@ -937,7 +936,7 @@ impl ClientBuilder {
     /// WinHTTP equivalent of HTTP/2 GOAWAY / REFUSED\_STREAM).  Use
     /// [`retry::never()`](crate::retry::never) to disable this.
     #[must_use]
-    pub fn retry(mut self, policy: crate::retry::Builder) -> Self {
+    pub fn retry(mut self, policy: retry::Builder) -> Self {
         self.retry_policy = Some(policy);
         self
     }
@@ -966,9 +965,9 @@ impl ClientBuilder {
                     .or(proxy_config.http_proxy_url.as_ref())
                     .cloned()
                     .unwrap_or_default();
-                crate::proxy::ProxyAction::Named(url, None)
+                proxy::ProxyAction::Named(url, None)
             } else {
-                crate::proxy::ProxyAction::Automatic
+                proxy::ProxyAction::Automatic
             };
 
         // Saturate to i32::MAX rather than silently truncating.
@@ -1024,7 +1023,7 @@ impl ClientBuilder {
                 https_only: self.https_only,
                 retry_policy: self
                     .retry_policy
-                    .unwrap_or_else(crate::retry::Builder::default)
+                    .unwrap_or_else(retry::Builder::default)
                     .into_policy(),
             }),
         })
@@ -1279,7 +1278,7 @@ mod tests {
                 "read_timeout",
             ),
             (
-                |b| b.redirect(crate::redirect::Policy::none()),
+                |b| b.redirect(redirect::Policy::none()),
                 |b| b.redirect_policy.is_some(),
                 "redirect_policy",
             ),

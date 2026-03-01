@@ -23,7 +23,7 @@
 //!   [`RequestBuilder::build()`](crate::RequestBuilder::build) injects an
 //!   `Authorization: Basic` header automatically (matching reqwest).
 
-use crate::Error;
+use crate::{Error, abi};
 
 // ---------------------------------------------------------------------------
 // ParseError
@@ -527,21 +527,21 @@ pub trait IntoUrl: IntoUrlSealed {}
 
 impl IntoUrlSealed for &str {
     fn into_url(self) -> Result<Url, Error> {
-        Url::parse_impl(self).map_err(|e| Error::builder(e.to_string()).with_source(e))
+        Url::parse_impl(self).map_err(Error::builder)
     }
 }
 impl IntoUrl for &str {}
 
 impl IntoUrlSealed for String {
     fn into_url(self) -> Result<Url, Error> {
-        Url::parse_impl(&self).map_err(|e| Error::builder(e.to_string()).with_source(e))
+        Url::parse_impl(&self).map_err(Error::builder)
     }
 }
 impl IntoUrl for String {}
 
 impl IntoUrlSealed for &String {
     fn into_url(self) -> Result<Url, Error> {
-        Url::parse_impl(self).map_err(|e| Error::builder(e.to_string()).with_source(e))
+        Url::parse_impl(self).map_err(Error::builder)
     }
 }
 impl IntoUrl for &String {}
@@ -579,7 +579,7 @@ impl Url {
         // string: look for `://`, then find `@` before the next `/`.
         let (url_without_userinfo, username, password) = extract_userinfo(url_for_crack);
 
-        let cracked = crate::abi::winhttp_crack_url(url_without_userinfo.as_ref())
+        let cracked = abi::winhttp_crack_url(url_without_userinfo.as_ref())
             .map_err(|_| ParseError::InvalidUrl)?;
 
         let scheme = cracked.scheme;

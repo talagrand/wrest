@@ -3,11 +3,14 @@
 //! [`RequestBuilder`] configures and sends an HTTP request. Obtain one via
 //! [`Client::get()`](crate::Client::get) or [`Client::post()`](crate::Client::post).
 
-use crate::client::Client;
-use crate::error::Error;
-use crate::response::Response;
-use crate::url::{IntoUrl, Url};
-use crate::util::{narrow_latin1, widen_latin1};
+use crate::{
+    Body,
+    client::Client,
+    error::{ContextError, Error},
+    response::Response,
+    url::{IntoUrl, Url},
+    util::{narrow_latin1, widen_latin1},
+};
 use std::time::Duration;
 
 // The future returned by `RequestBuilder::send()` must be Send so callers can
@@ -34,7 +37,7 @@ pub struct Request {
     method: http::Method,
     url: Url,
     headers: http::HeaderMap,
-    body: Option<crate::Body>,
+    body: Option<Body>,
     timeout: Option<Duration>,
     version: http::Version,
 }
@@ -94,12 +97,12 @@ impl Request {
     /// Returns the request body, if set.
     ///
     /// Returns `None` if no body was set on the request.
-    pub fn body(&self) -> Option<&crate::Body> {
+    pub fn body(&self) -> Option<&Body> {
         self.body.as_ref()
     }
 
     /// Returns a mutable reference to the request body.
-    pub fn body_mut(&mut self) -> &mut Option<crate::Body> {
+    pub fn body_mut(&mut self) -> &mut Option<Body> {
         &mut self.body
     }
 
@@ -156,7 +159,7 @@ impl Request {
     /// Consume the request and return its parts.
     pub(crate) fn into_parts(
         self,
-    ) -> (http::Method, Url, http::HeaderMap, Option<crate::Body>, Option<Duration>) {
+    ) -> (http::Method, Url, http::HeaderMap, Option<Body>, Option<Duration>) {
         (self.method, self.url, self.headers, self.body, self.timeout)
     }
 }
@@ -165,13 +168,12 @@ impl Request {
 ///
 /// The URI is parsed into a [`Url`]; this fails if the URI is not a valid
 /// absolute `http` or `https` URL.
-impl<T: Into<crate::Body>> TryFrom<http::Request<T>> for Request {
-    type Error = crate::Error;
+impl<T: Into<Body>> TryFrom<http::Request<T>> for Request {
+    type Error = Error;
 
     fn try_from(req: http::Request<T>) -> Result<Self, Self::Error> {
         let (parts, body) = req.into_parts();
-        let url = Url::from_http_uri(&parts.uri)
-            .map_err(|e| crate::Error::builder(e.to_string()).with_source(e))?;
+        let url = Url::from_http_uri(&parts.uri).map_err(Error::builder)?;
         Ok(Request {
             method: parts.method,
             url,
@@ -187,20 +189,17 @@ impl<T: Into<crate::Body>> TryFrom<http::Request<T>> for Request {
 ///
 /// The URL is serialized as the URI. This fails if the URL cannot be
 /// parsed as a valid `http::Uri`.
-impl TryFrom<Request> for http::Request<crate::Body> {
-    type Error = crate::Error;
+impl TryFrom<Request> for http::Request<Body> {
+    type Error = Error;
 
     fn try_from(req: Request) -> Result<Self, Self::Error> {
-        let uri = req
-            .url
-            .to_http_uri()
-            .map_err(|e| crate::Error::builder("invalid URI").with_source(e))?;
+        let uri = req.url.to_http_uri().map_err(Error::builder)?;
         let mut out = http::Request::builder()
             .method(req.method)
             .uri(uri)
             .version(req.version)
             .body(req.body.unwrap_or_default())
-            .map_err(|e| crate::Error::builder("failed to build http::Request").with_source(e))?;
+            .map_err(Error::builder)?;
         *out.headers_mut() = req.headers;
         Ok(out)
     }
@@ -215,7 +214,7 @@ pub struct RequestBuilder {
     method: String,
     url: Result<Url, Error>,
     headers: Vec<(String, String)>,
-    body: Option<crate::Body>,
+    body: Option<Body>,
     timeout: Option<Duration>,
 }
 
@@ -263,7 +262,7 @@ impl RequestBuilder {
             Ok(n) => n,
             Err(e) => {
                 let e: http::Error = e.into();
-                self.url = Err(Error::builder("invalid header name").with_source(e));
+                self.url = Err(Error::builder(e));
                 return self;
             }
         };
@@ -271,7 +270,7 @@ impl RequestBuilder {
             Ok(v) => v,
             Err(e) => {
                 let e: http::Error = e.into();
-                self.url = Err(Error::builder("invalid header value").with_source(e));
+                self.url = Err(Error::builder(e));
                 return self;
             }
         };
@@ -293,11 +292,11 @@ impl RequestBuilder {
             Ok(data) => {
                 self.headers
                     .push(("Content-Type".to_owned(), "application/json".to_owned()));
-                self.body = Some(crate::Body::from(data));
+                self.body = Some(Body::from(data));
             }
             Err(e) => {
                 // Defer the error to send() -- replace url with Err
-                self.url = Err(Error::builder("JSON serialization failed").with_source(e));
+                self.url = Err(Error::builder(ContextError::new("JSON serialization failed", e)));
             }
         }
         self
@@ -308,7 +307,7 @@ impl RequestBuilder {
     /// Accepts any type that can be converted into a [`Body`](crate::Body),
     /// including `String`, `&str`, `Vec<u8>`, `&[u8]`, and `Bytes`.
     #[must_use]
-    pub fn body<B: Into<crate::Body>>(mut self, body: B) -> Self {
+    pub fn body<B: Into<Body>>(mut self, body: B) -> Self {
         self.body = Some(body.into());
         self
     }
@@ -409,7 +408,7 @@ impl RequestBuilder {
                     "Content-Type".to_owned(),
                     "application/x-www-form-urlencoded".to_owned(),
                 ));
-                self.body = Some(crate::Body::from(encoded.into_bytes()));
+                self.body = Some(Body::from(encoded.into_bytes()));
             }
             Err(e) => {
                 self.url = Err(e);
@@ -472,11 +471,11 @@ impl RequestBuilder {
 
         // Append per-request headers (accumulates multi-values).
         for (name, value) in &self.headers {
-            let header_name = http::header::HeaderName::from_bytes(name.as_bytes())
-                .map_err(|e| Error::builder("invalid header name").with_source(e))?;
+            let header_name =
+                http::header::HeaderName::from_bytes(name.as_bytes()).map_err(Error::builder)?;
 
             let header_value = http::header::HeaderValue::from_bytes(&narrow_latin1(value))
-                .map_err(|e| Error::builder("invalid header value").with_source(e))?;
+                .map_err(Error::builder)?;
             header_map.append(header_name, header_value);
         }
 
@@ -502,8 +501,7 @@ impl RequestBuilder {
             }
         }
 
-        let method = http::Method::from_bytes(self.method.as_bytes())
-            .map_err(|e| Error::builder("invalid method").with_source(e))?;
+        let method = http::Method::from_bytes(self.method.as_bytes()).map_err(Error::builder)?;
 
         Ok(Request {
             method,
@@ -610,7 +608,7 @@ impl RequestBuilder {
 /// dependencies.
 fn serialize_form_urlencoded<T: serde::Serialize + ?Sized>(value: &T) -> Result<String, Error> {
     let json = serde_json::to_value(value)
-        .map_err(|e| Error::builder("form serialization failed").with_source(e))?;
+        .map_err(|e| Error::builder(ContextError::new("form serialization failed", e)))?;
 
     let mut ser = form_urlencoded::Serializer::new(String::new());
 
@@ -1006,7 +1004,7 @@ mod tests {
         assert_eq!(req.method(), &http::Method::POST);
 
         // url_mut
-        let new_url: crate::url::Url = "https://other.com".parse().unwrap();
+        let new_url: Url = "https://other.com".parse().unwrap();
         *req.url_mut() = new_url;
         assert_eq!(req.url().host_str(), Some("other.com"));
 
@@ -1017,7 +1015,7 @@ mod tests {
 
         // body_mut
         assert!(req.body().is_none());
-        *req.body_mut() = Some(crate::Body::from("payload"));
+        *req.body_mut() = Some(Body::from("payload"));
         assert!(req.body().is_some());
         assert_eq!(req.body().unwrap().as_bytes().unwrap(), b"payload");
 
@@ -1032,9 +1030,9 @@ mod tests {
     #[test]
     fn request_try_clone_table() {
         // (body, expect_clone, label)
-        let cases: Vec<(Option<crate::Body>, bool, &str)> = vec![
+        let cases: Vec<(Option<Body>, bool, &str)> = vec![
             (None, true, "no body"),
-            (Some(crate::Body::from("payload")), true, "bytes body"),
+            (Some(Body::from("payload")), true, "bytes body"),
             // Stream body cannot be cloned -- try_clone returns None.
         ];
 
@@ -1057,10 +1055,10 @@ mod tests {
 
         // Stream body -- cannot clone
         let stream = futures_util::stream::once(async {
-            Ok::<_, crate::Error>(bytes::Bytes::from_static(b"data"))
+            Ok::<_, Error>(bytes::Bytes::from_static(b"data"))
         });
         let mut req = Request::new(http::Method::POST, "https://example.com".parse().unwrap());
-        req.body = Some(crate::Body::wrap_stream(stream));
+        req.body = Some(Body::wrap_stream(stream));
         assert!(req.try_clone().is_none(), "stream body cannot be cloned");
     }
 
@@ -1351,7 +1349,7 @@ mod tests {
         assert_eq!(wrest_req.headers().get("x-custom").unwrap(), "value");
         assert_eq!(wrest_req.body().unwrap().as_bytes().unwrap(), b"payload");
 
-        let back: http::Request<crate::Body> = wrest_req.try_into().unwrap();
+        let back: http::Request<Body> = wrest_req.try_into().unwrap();
         assert_eq!(back.method(), http::Method::POST);
         assert_eq!(back.uri(), "https://example.com/api");
         assert_eq!(back.version(), http::Version::HTTP_11);
@@ -1360,7 +1358,7 @@ mod tests {
 
         // No body → default empty body.
         let no_body = Request::new(http::Method::GET, "https://example.com".parse().unwrap());
-        let http_req: http::Request<crate::Body> = no_body.try_into().unwrap();
+        let http_req: http::Request<Body> = no_body.try_into().unwrap();
         assert_eq!(http_req.body().as_bytes().unwrap(), b"");
 
         // Unsupported scheme → error.

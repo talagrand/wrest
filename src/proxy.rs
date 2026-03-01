@@ -7,7 +7,7 @@
 //!
 //! Also provides public [`Proxy`] and [`NoProxy`] types matching reqwest's API.
 
-use crate::util::read_env_var;
+use crate::{error::Error, util::read_env_var};
 
 // ---------------------------------------------------------------------------
 // Public types -- match reqwest::Proxy / reqwest::NoProxy
@@ -54,11 +54,11 @@ enum ProxyKind {
 /// success.
 fn validate_proxy_url(url: &str) -> crate::Result<()> {
     if url.is_empty() {
-        return Err(crate::Error::builder("proxy URL must not be empty"));
+        return Err(Error::builder("proxy URL must not be empty"));
     }
     // Reject SOCKS -- WinHTTP only supports HTTP CONNECT proxies.
     if url.starts_with("socks5://") || url.starts_with("socks4://") {
-        return Err(crate::Error::builder(format!(
+        return Err(Error::builder(format!(
             "SOCKS proxies are not supported by WinHTTP -- got {url:?}"
         )));
     }
@@ -68,7 +68,7 @@ fn validate_proxy_url(url: &str) -> crate::Result<()> {
     } else if let Some(r) = url.strip_prefix("https://") {
         r
     } else {
-        return Err(crate::Error::builder(format!(
+        return Err(Error::builder(format!(
             "proxy URL must start with http:// or https:// -- got {url:?}"
         )));
     };
@@ -76,7 +76,7 @@ fn validate_proxy_url(url: &str) -> crate::Result<()> {
     let host_part = rest.split('/').next().unwrap_or("");
     let host_part = host_part.split(':').next().unwrap_or("");
     if host_part.is_empty() {
-        return Err(crate::Error::builder(format!("proxy URL has no host -- got {url:?}")));
+        return Err(Error::builder(format!("proxy URL has no host -- got {url:?}")));
     }
     Ok(())
 }
@@ -748,7 +748,7 @@ mod tests {
 
     #[test]
     fn proxy_constructor_rejects_bad_input() {
-        type TestCase<'a> = (&'a str, fn(&str) -> Result<Proxy, crate::Error>, &'a str);
+        type TestCase<'a> = (&'a str, fn(&str) -> Result<Proxy, Error>, &'a str);
         let cases: &[TestCase] = &[
             ("all(socks5)", |u| Proxy::all(u), "socks5://proxy:1080"),
             ("all(socks4)", |u| Proxy::all(u), "socks4://proxy:1080"),

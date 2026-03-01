@@ -4,7 +4,7 @@
 //! WinHTTP-specific or Win32-specific -- these are general-purpose building
 //! blocks. Win32 FFI wrappers live in [`abi`](crate::abi).
 
-use crate::Error;
+use crate::{Error, error::ContextError};
 
 // ---------------------------------------------------------------------------
 // Wide-string helpers
@@ -69,10 +69,11 @@ pub(crate) fn read_env_var(name: &str) -> Option<String> {
 /// Convert a `&[u16]` buffer to a `String`, returning a [`Error::decode`]
 /// on invalid UTF-16.
 ///
-/// `context` is included in the error message to indicate the source of the
-/// data (e.g. `"UTF-16LE"`, `"ICU produced invalid UTF-16"`).
-pub(crate) fn string_from_utf16(buf: &[u16], context: &str) -> Result<String, Error> {
-    String::from_utf16(buf).map_err(|e| Error::decode(context).with_source(e))
+/// `context` describes the conversion path (e.g. `"UTF-16LE"`,
+/// `"ICU produced invalid UTF-16"`) and is preserved in the error's
+/// source chain via [`ContextError`](crate::error::ContextError).
+pub(crate) fn string_from_utf16(buf: &[u16], context: &'static str) -> Result<String, Error> {
+    String::from_utf16(buf).map_err(|e| Error::decode(ContextError::new(context, e)))
 }
 
 // ---------------------------------------------------------------------------

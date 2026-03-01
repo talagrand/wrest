@@ -4,17 +4,20 @@
 //! [`chunk()`](Response::chunk), [`text()`](Response::text), or
 //! [`bytes()`](Response::bytes).
 
-use crate::client::Client;
-use crate::error::Error;
-use crate::url::Url;
-use crate::winhttp::{self, RawResponse};
+use crate::{
+    Body,
+    client::Client,
+    encoding,
+    error::{ContextError, Error},
+    url::Url,
+    winhttp::{self, RawResponse},
+};
 use bytes::{Bytes, BytesMut};
 use futures_util::future::Either;
 use http::{Extensions, HeaderMap, StatusCode, Version};
 #[cfg(feature = "noop-compat")]
 use std::net::SocketAddr;
-use std::pin::pin;
-use std::time::Instant;
+use std::{pin::pin, time::Instant};
 
 /// An HTTP response.
 ///
@@ -284,11 +287,11 @@ impl Response {
     /// wrest uses Win32 `MultiByteToWideChar` instead (see
     /// [`text()`](Self::text)).
     pub async fn text_with_charset(mut self, default_encoding: &str) -> Result<String, Error> {
-        let charset = crate::encoding::extract_charset_from_content_type(&self.headers)
+        let charset = encoding::extract_charset_from_content_type(&self.headers)
             .unwrap_or_else(|| default_encoding.to_owned());
         trace!(charset = charset, "decoding response body");
         let data = self.collect_body().await?;
-        crate::encoding::decode_body(&data, &charset)
+        encoding::decode_body(&data, &charset)
     }
 
     /// Deserialize the response body as JSON.
@@ -305,7 +308,7 @@ impl Response {
     pub async fn json<T: serde::de::DeserializeOwned>(mut self) -> Result<T, Error> {
         let data = self.collect_body().await?;
         serde_json::from_slice(&data)
-            .map_err(|e| Error::decode("JSON deserialization failed").with_source(e))
+            .map_err(|e| Error::decode(ContextError::new("JSON deserialization failed", e)))
     }
 
     /// Read the entire response body as raw bytes.
@@ -340,7 +343,7 @@ impl Response {
     /// Headers and extensions are moved out; only the body-streaming
     /// internals (`raw`, `deadline`, `_client`) remain in the response
     /// that drives the stream.
-    fn into_parts(self) -> (ResponseParts, crate::Body) {
+    fn into_parts(self) -> (ResponseParts, Body) {
         let Response {
             status,
             version,
@@ -371,7 +374,7 @@ impl Response {
             deadline,
             _client: client,
         };
-        let body: crate::Body = streamer.into();
+        let body: Body = streamer.into();
 
         (parts, body)
     }
@@ -455,8 +458,8 @@ struct ResponseParts {
 ///
 /// The response body is streamed -- it is not buffered into memory.
 /// Headers, status, version, and extensions are preserved.
-impl From<Response> for http::Response<crate::Body> {
-    fn from(resp: Response) -> http::Response<crate::Body> {
+impl From<Response> for http::Response<Body> {
+    fn from(resp: Response) -> http::Response<Body> {
         let (parts, body) = resp.into_parts();
         let mut out = http::Response::builder()
             .status(parts.status)
@@ -624,14 +627,14 @@ mod tests {
     fn response_conversions() {
         // From<Response> for Body produces a stream.
         let resp = synthetic(StatusCode::OK, HeaderMap::new());
-        let body: crate::Body = resp.into();
+        let body: Body = resp.into();
         assert!(body.as_bytes().is_none(), "piped body should be a stream");
 
         // From<Response> for http::Response preserves metadata.
         let mut headers = HeaderMap::new();
         headers.insert("x-test", "value".parse().unwrap());
         let resp = synthetic(StatusCode::NOT_FOUND, headers);
-        let http_resp: http::Response<crate::Body> = resp.into();
+        let http_resp: http::Response<Body> = resp.into();
         assert_eq!(http_resp.status(), StatusCode::NOT_FOUND);
         assert_eq!(http_resp.version(), Version::HTTP_11);
         assert_eq!(http_resp.headers().get("x-test").unwrap(), "value");

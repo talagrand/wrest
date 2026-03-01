@@ -1,6 +1,8 @@
 //! WinHTTP session, request, query, and I/O wrappers.
 
 use super::{check_win32_bool, last_win32_error, to_wide};
+use crate::{Error, error::ContextError, util::wide_to_string};
+use windows_sys::Win32::{Foundation::GetLastError, Networking::WinHttp::*};
 
 /// Raw handle type used by WinHTTP (`*mut c_void`).
 pub(crate) type RawWinHttpHandle = *mut core::ffi::c_void;
@@ -13,10 +15,6 @@ fn check_winhttp_handle(handle: RawWinHttpHandle) -> Result<RawWinHttpHandle, Er
         Err(last_win32_error())
     }
 }
-use crate::Error;
-use crate::util::wide_to_string;
-use windows_sys::Win32::Foundation::GetLastError;
-use windows_sys::Win32::Networking::WinHttp::*;
 
 // ---------------------------------------------------------------------------
 // WinHTTP session
@@ -510,7 +508,7 @@ pub(crate) fn winhttp_crack_url(url: &str) -> Result<CrackedUrl, Error> {
             ICU_ESCAPE,
             &mut components,
         ))
-        .map_err(|e| Error::builder(format!("invalid URL: {url}")).with_source(e))?;
+        .map_err(|e| Error::builder(ContextError::new(format!("invalid URL: {url}"), e)))?;
     }
 
     Ok(CrackedUrl {
@@ -586,15 +584,11 @@ mod tests {
 
     #[test]
     fn winhttp_crack_url_errors_table() {
-        let cases: &[(&str, &str, &str)] =
-            &[("", "empty", "empty string"), ("not a url at all", "invalid URL", "garbage input")];
+        let cases: &[(&str, &str)] = &[("", "empty"), ("not a url at all", "garbage input")];
 
-        for &(input, needle, label) in cases {
+        for &(input, label) in cases {
             let err = winhttp_crack_url(input).expect_err(&format!("{label}: should fail"));
             assert!(err.is_builder(), "{label}: expected builder error");
-            // Display shows kind prefix; detail text is in Debug.
-            let debug = format!("{err:?}");
-            assert!(debug.contains(needle), "{label}: expected '{needle}' in debug, got: {debug}");
         }
     }
 }

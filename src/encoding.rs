@@ -58,7 +58,7 @@
 //! Reference: <https://encoding.spec.whatwg.org/>
 //! Canonical label list: <https://encoding.spec.whatwg.org/encodings.json>
 
-use crate::Error;
+use crate::{Error, abi, util::string_from_utf16};
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -113,12 +113,12 @@ pub(crate) fn decode_body(data: &[u8], charset: &str) -> Result<String, Error> {
     // -- ICU fallback for NLS-unsupported code pages -------------------
     if let Some(icu_name) = codepage_to_icu_name(codepage) {
         trace!(label = charset, codepage, icu = icu_name, "charset: ICU fallback decode");
-        return crate::abi::icu_decode(icu_name, data);
+        return abi::icu_decode(icu_name, data);
     }
 
     // -- Win32 MultiByteToWideChar ------------------------------------
     trace!(label = charset, codepage, "charset: Win32 codepage decode");
-    crate::abi::multi_byte_to_string(codepage, data)
+    abi::multi_byte_to_string(codepage, data)
 }
 
 // ---------------------------------------------------------------------------
@@ -416,7 +416,7 @@ fn decode_utf16le(data: &[u8]) -> Result<String, Error> {
         .chunks_exact(2)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
-    crate::util::string_from_utf16(&words, "invalid UTF-16LE")
+    string_from_utf16(&words, "invalid UTF-16LE")
 }
 
 /// Decode a UTF-16BE byte stream.
@@ -429,7 +429,7 @@ fn decode_utf16be(data: &[u8]) -> Result<String, Error> {
         .chunks_exact(2)
         .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .collect();
-    crate::util::string_from_utf16(&words, "invalid UTF-16BE")
+    string_from_utf16(&words, "invalid UTF-16BE")
 }
 
 // ---------------------------------------------------------------------------
