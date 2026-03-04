@@ -108,6 +108,15 @@ jobs:
     - name: Build documentation
       run: cargo doc --features __all-native-features --no-deps
 
+    - name: Check for broken doc links
+      shell: pwsh
+      run: |
+        $out = cargo doc --features __all-native-features --no-deps 2>&1
+        if ($out | Select-String -Pattern 'warning|error') {
+          $out | Select-String -Pattern 'warning|error'
+          exit 1
+        }
+
   coverage:
     name: Coverage
     runs-on: windows-latest
@@ -131,6 +140,7 @@ jobs:
       run: cargo llvm-cov --features __all-native-features --lcov --output-path lcov.info
 
     - name: Upload to Codecov
+      if: env.CODECOV_TOKEN != ''
       uses: codecov/codecov-action@v5
       with:
         files: lcov.info
