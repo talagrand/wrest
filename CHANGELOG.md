@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Removed `ClientBuilder::no_trust_dns()` (removed in reqwest 0.12); use `no_hickory_dns()` instead. Breakage should be acceptable since we are tracking reqwest 0.13.
 - Wrest errors now use `source` chain so callers that do source chain traversal in `reqwest` see the same Error "shape". `Error::source()` now always returns `Some` for non-status errors.
 - Performance: `Error` object size is now pointer-sized and errors are not greedily stringified.
+- Release workflow switched to OIDC trusted publishing for crates.io (no more `CRATES_IO_TOKEN` secret).
 
 ### Fixed
 - Fixed `WinHttpSetCredentials` return value being silently discarded; proxy auth failures now propagate as errors instead of producing 407 responses.
