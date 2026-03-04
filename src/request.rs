@@ -6,7 +6,7 @@
 use crate::{
     Body,
     client::Client,
-    error::{ContextError, Error},
+    error::Error,
     response::Response,
     url::{IntoUrl, Url},
     util::{narrow_latin1, widen_latin1},
@@ -296,7 +296,10 @@ impl RequestBuilder {
             }
             Err(e) => {
                 // Defer the error to send() -- replace url with Err
-                self.url = Err(Error::builder(ContextError::new("JSON serialization failed", e)));
+                self.url = Err(Error::builder(crate::error::ContextError::new(
+                    "JSON serialization failed",
+                    e,
+                )));
             }
         }
         self
@@ -607,8 +610,9 @@ impl RequestBuilder {
 /// This handles structs, maps, and `&[(K, V)]` uniformly without extra
 /// dependencies.
 fn serialize_form_urlencoded<T: serde::Serialize + ?Sized>(value: &T) -> Result<String, Error> {
-    let json = serde_json::to_value(value)
-        .map_err(|e| Error::builder(ContextError::new("form serialization failed", e)))?;
+    let json = serde_json::to_value(value).map_err(|e| {
+        Error::builder(crate::error::ContextError::new("form serialization failed", e))
+    })?;
 
     let mut ser = form_urlencoded::Serializer::new(String::new());
 

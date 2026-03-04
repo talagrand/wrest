@@ -8,15 +8,13 @@ use crate::{
     Body,
     client::Client,
     encoding,
-    error::{ContextError, Error},
+    error::Error,
     url::Url,
     winhttp::{self, RawResponse},
 };
 use bytes::{Bytes, BytesMut};
 use futures_util::future::Either;
 use http::{Extensions, HeaderMap, StatusCode, Version};
-#[cfg(feature = "noop-compat")]
-use std::net::SocketAddr;
 use std::{pin::pin, time::Instant};
 
 /// An HTTP response.
@@ -307,8 +305,9 @@ impl Response {
     #[cfg(feature = "json")]
     pub async fn json<T: serde::de::DeserializeOwned>(mut self) -> Result<T, Error> {
         let data = self.collect_body().await?;
-        serde_json::from_slice(&data)
-            .map_err(|e| Error::decode(ContextError::new("JSON deserialization failed", e)))
+        serde_json::from_slice(&data).map_err(|e| {
+            Error::decode(crate::error::ContextError::new("JSON deserialization failed", e))
+        })
     }
 
     /// Read the entire response body as raw bytes.
@@ -386,7 +385,7 @@ impl Response {
     /// WinHTTP does not expose the remote socket address.  Always
     /// returns `None`.  Requires the `noop-compat` feature.
     #[cfg(feature = "noop-compat")]
-    pub fn remote_addr(&self) -> Option<SocketAddr> {
+    pub fn remote_addr(&self) -> Option<std::net::SocketAddr> {
         None
     }
 
