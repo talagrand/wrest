@@ -561,7 +561,7 @@ impl Url {
     /// eagerly so downstream code never needs a separate conversion step.
     pub(crate) fn parse_impl(url: &str) -> Result<Self, ParseError> {
         // Extract fragment from the original URL before WinHttpCrackUrl,
-        // which escapes '#' to '%23' under ICU_ESCAPE.
+        // which would include '#...' as part of the extra-info component.
         let (url_for_crack, fragment) = match url.split_once('#') {
             Some((before, frag)) => (
                 before,
@@ -612,11 +612,10 @@ impl Url {
             format!("{path}{extra}")
         };
 
-        // Rebuild serialized from the cracked (percent-encoded) components
-        // so that `as_str()` agrees with `path()`, `query()`, etc.
-        // WinHttpCrackUrl with ICU_ESCAPE normalises path/query encoding;
-        // using the original input would leave `as_str()` returning the
-        // raw string while `path()` returns the encoded version (QOI-4).
+        // Rebuild serialized from the cracked components so that
+        // `as_str()` agrees with `path()`, `query()`, etc.
+        // WinHttpCrackUrl (with flags=0) preserves percent-encoding
+        // as-is, so the roundtripped string matches the input.
         let mut serialized = if explicit_port {
             format!("{scheme_lower}://{host}:{port}")
         } else {
@@ -958,40 +957,76 @@ mod tests {
 
     // -- Url parsing tests (data-driven) --
 
-    /// Each entry: (input, is_https, host, port, path_and_query).
-    const PARSE_CASES: &[(&str, bool, &str, u16, &str)] = &[
-        ("https://example.com/api/v1?id=42", true, "example.com", 443, "/api/v1?id=42"),
-        ("http://localhost:8080/test", false, "localhost", 8080, "/test"),
-        ("https://example.com", true, "example.com", 443, "/"),
-        ("http://example.com", false, "example.com", 80, "/"),
-        ("https://example.com/path/to/resource", true, "example.com", 443, "/path/to/resource"),
-        ("https://example.com:9443/secure", true, "example.com", 9443, "/secure"),
+    /// (input, host, port, path, query, fragment)
+    type ParseCase =
+        (&'static str, &'static str, u16, &'static str, Option<&'static str>, Option<&'static str>);
+
+    /// All RFC-3986-valid URLs; WinHttpCrackUrl with `flags=0` must parse
+    /// these correctly and preserve percent-encoding without double-encoding.
+    const PARSE_CASES: &[ParseCase] = &[
+        // Basic structure
+        ("https://example.com/api/v1?id=42", "example.com", 443, "/api/v1", Some("id=42"), None),
+        ("http://localhost:8080/test", "localhost", 8080, "/test", None, None),
+        ("https://example.com", "example.com", 443, "/", None, None),
+        ("http://example.com", "example.com", 80, "/", None, None),
+        (
+            "https://example.com/path/to/resource",
+            "example.com",
+            443,
+            "/path/to/resource",
+            None,
+            None,
+        ),
+        ("https://example.com:9443/secure", "example.com", 9443, "/secure", None, None),
+        // Fragment
+        ("https://example.com/page#section", "example.com", 443, "/page", None, Some("section")),
+        // Query + fragment
+        (
+            "https://example.com/api?key=val&a=b#frag",
+            "example.com",
+            443,
+            "/api",
+            Some("key=val&a=b"),
+            Some("frag"),
+        ),
+        // Percent-encoding preservation (no double-encoding)
+        (
+            "http://tlu.dl.delivery.mp.microsoft.com/files/abc123?P1=123&P2=404&P3=2&P4=cLS1G9%2btest%2fvalue%3d%3d",
+            "tlu.dl.delivery.mp.microsoft.com",
+            80,
+            "/files/abc123",
+            Some("P1=123&P2=404&P3=2&P4=cLS1G9%2btest%2fvalue%3d%3d"),
+            None,
+        ),
+        // %25 (encoded percent) survives round-trip in all components
+        ("https://example.com/%25?%25#%25", "example.com", 443, "/%25", Some("%25"), Some("%25")),
+        // Mixed encoded and literal characters
+        (
+            "https://example.com/a%2Fb?x=%3D#y%23z",
+            "example.com",
+            443,
+            "/a%2Fb",
+            Some("x=%3D"),
+            Some("y%23z"),
+        ),
     ];
 
     #[test]
     fn parse_urls() {
-        for &(input, is_https, host, port, pq) in PARSE_CASES {
+        for &(input, host, port, path, query, fragment) in PARSE_CASES {
             let parsed = input.into_url().unwrap_or_else(|e| panic!("{input}: {e}"));
-            assert_eq!(parsed.is_https, is_https, "{input}: is_https");
             assert_eq!(parsed.host, host, "{input}: host");
             assert_eq!(parsed.port, port, "{input}: port");
-            assert_eq!(parsed.path_and_query, pq, "{input}: path_and_query");
+            assert_eq!(parsed.path(), path, "{input}: path");
+            assert_eq!(parsed.query(), query, "{input}: query");
+            assert_eq!(parsed.fragment(), fragment, "{input}: fragment");
+            // No spurious double-encoding.
+            assert!(
+                !parsed.as_str().contains("%25") || input.contains("%25"),
+                "{input}: spurious %25 in as_str(): {}",
+                parsed.as_str()
+            );
         }
-    }
-
-    #[test]
-    fn parse_url_with_fragment() {
-        let parsed = "https://example.com/page#section".into_url().unwrap();
-        assert!(parsed.path_and_query.starts_with("/page"));
-    }
-
-    #[test]
-    fn parse_url_with_query_and_fragment() {
-        let parsed = "https://example.com/api?key=val&a=b#frag"
-            .into_url()
-            .unwrap();
-        assert!(parsed.path_and_query.contains("key=val"));
-        assert!(parsed.path_and_query.contains("a=b"));
     }
 
     // -- IntoUrl impls --
