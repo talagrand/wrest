@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to Semantic Versioning.
 
+## 0.5.5
+
+### Fixed
+- Fixed `WinHttpCrackUrl` double-encoding. Existing percent-encoded sequences (e.g., `%3d`, `%2f`) are preserved as-is. Previously, `ICU_ESCAPE` would re-encode them (`%3d` → `%253d`), causing 403 errors from servers that validate URL tokens.
+
+### Added
+- Added URL parsing conformance test (`tests/url_parse.rs`) that fetches the WHATWG URL parsing test suite and validates all applicable cases. RFC-clean URLs must match exactly; error-recovery divergences between WinHTTP and WHATWG are tracked.
+- Added `docs/url-standards.md` documenting the relationship between RFC 3986, the WHATWG URL Standard, and WinHTTP's URL parser.
+
 ## 0.5.4
 
 ### Added

@@ -64,15 +64,15 @@ println!("{body}");
 
 wrest returns standard `Future`s with no hidden dependency on
 [`tokio`](https://docs.rs/tokio),
-[`async-std`](https://docs.rs/async-std), or any other runtime. Use it with
+[`smol`](https://docs.rs/smol), or any other runtime. Use it with
 whichever executor you prefer:
 
 ```rust,ignore
 // tokio
 tokio::runtime::Runtime::new()?.block_on(do_request());
 
-// futures
-futures::executor::block_on(do_request());
+// futures-executor
+futures_executor::block_on(do_request());
 
 // smol
 smol::block_on(do_request());
@@ -80,7 +80,7 @@ smol::block_on(do_request());
 
 wrest also ships a small `Runtime` abstraction that picks the minimal
 executor for the native backend and the reqwest passthrough. On the
-native backend it delegates to `futures::executor::block_on`; with reqwest
+native backend it delegates to `futures_executor::block_on`; with reqwest
 pass-through it wraps a single-threaded `tokio::Runtime`.
 
 ```rust,ignore
