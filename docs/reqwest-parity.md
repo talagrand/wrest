@@ -23,7 +23,7 @@ Each row is a single public API item. Status meanings:
 | `Response` | ✓ | ✓ | ✅ | |
 | `Body` | ✓ | ✓ | ✅ | |
 | `Error` / `Result` | ✓ | ✓ | ✅ | |
-| `Url` | ✓ | ✓ | ✅ | reqwest re-exports `url::Url`; wrest provides its own `Url` type backed by `WinHttpCrackUrl` — see **Url Methods** section below |
+| `Url` | ✓ | ✓ | ✅ | reqwest re-exports `url::Url`; wrest provides its own `Url` type backed by `WinHttpCrackUrl`. For WHATWG/RFC 3986 error recovery differences, see **Url Methods** section  |
 | `Method` | ✓ | ✓ | ✅ | |
 | `StatusCode` | ✓ | ✓ | ✅ | |
 | `Version` (http) | ✓ | ✓ | ✅ | |
@@ -325,7 +325,13 @@ Each row is a single public API item. Status meanings:
 ## `Url` Methods
 
 wrest provides its own `Url` type backed by `WinHttpCrackUrl`, not
-`url::Url`.  The intentional subset is documented here.  Missing methods
+`url::Url`.  For valid RFC 3986 URLs, both produce identical results.
+For invalid input, behavior is ambiguous: the native backend uses
+WinHTTP's error handling, while the reqwest passthrough uses WHATWG
+(via the `url` crate).  See [docs/url-standards.md](url-standards.md)
+for a detailed comparison.
+
+The intentional API subset is documented here.  Missing methods
 are feasible future work unless noted otherwise.
 
 ### Type-level differences

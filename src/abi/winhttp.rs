@@ -505,7 +505,11 @@ pub(crate) fn winhttp_crack_url(url: &str) -> Result<CrackedUrl, Error> {
         check_win32_bool(WinHttpCrackUrl(
             wide.as_ptr(),
             wide.len() as u32,
-            ICU_ESCAPE,
+            // No flags -- preserve percent-encoding as-is.
+            // ICU_ESCAPE would double-encode: %3d → %253d.
+            // ICU_DECODE would decode: %3d → =.
+            // Neither is correct for URLs which are already encoded.
+            0,
             &mut components,
         ))
         .map_err(|e| Error::builder(ContextError::new(format!("invalid URL: {url}"), e)))?;
