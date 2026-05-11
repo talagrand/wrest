@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - CI - Add macOS coverage.
 - CI - MSRV does not bound dev-dependencies (cargo test -> cargo check)
 - CI - Code coverage switches to OIDC publish
+- CI - Add workflow lint (actionlint) to guard matrix/needs references, action input shapes, and GitHub expression syntax.
 - Release - Miscellaneous resiliency fixes
 
 ## 0.5.5

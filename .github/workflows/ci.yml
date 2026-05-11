@@ -199,13 +199,25 @@ jobs:
       shell: bash
       run: cargo +nightly minimal-versions check --direct --features __all-native-features
 
+  workflow-lint:
+    name: Workflow Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: Run actionlint
+      uses: raven-actions/actionlint@v2
+
   ci-success:
     # Single required status check for branch protection.  Add new jobs to
     # `needs:` rather than re-listing each one in the branch protection rule.
     name: CI Success
     if: always()
     runs-on: ubuntu-latest
-    needs: [test, fmt, docs, coverage, security, minimal-versions]
+    needs: [test, fmt, workflow-lint, docs, coverage, security, minimal-versions]
     steps:
       - name: Verify all required jobs succeeded
         if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
