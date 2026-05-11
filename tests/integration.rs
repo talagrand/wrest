@@ -540,10 +540,10 @@ async fn response_headers() {
 #[tokio::test]
 async fn content_length_present() {
     let body = "twelve chars";
-    let server = mock_get("/clen", 200, body).await;
+    let server = mock_get("/content-length", 200, body).await;
 
     let resp = test_client()
-        .get(format!("{}/clen", server.uri()))
+        .get(format!("{}/content-length", server.uri()))
         .send()
         .await
         .expect("request should succeed");
@@ -1488,7 +1488,7 @@ async fn text_with_latin1_charset() {
         .expect("request should succeed");
 
     let text = resp.text().await.expect("text() should succeed");
-    assert_eq!(text, "caf\u{e9}", "Latin-1 0xE9 should decode to U+00E9");
+    assert_eq!(text, "caf\u{e9}", "Latin-1 0xE9 should decode to U+00E9"); // spellchecker:disable-line
 }
 
 // -----------------------------------------------------------------------
