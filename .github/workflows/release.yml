@@ -1,5 +1,8 @@
 name: Release
 
+# Pin actions to commit SHAs for supply-chain-hardening since this is a trusted path.
+# Dependabot is there to keep these up to date.
+
 on:
   push:
     tags:
@@ -9,27 +12,66 @@ env:
   CARGO_TERM_COLOR: always
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   create-release:
     name: Create Release
     runs-on: ubuntu-latest
+    needs: publish-crate
     # Only run in non-fork repositories (e.g., the canonical repo),
     # so tags in forks don't create upstream-style releases.
     if: github.event.repository.fork == false
+    permissions:
+      contents: write   # gh release create
     outputs:
       tag_name: ${{ steps.tag_name.outputs.TAG_NAME }}
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v6
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
     - name: Get tag name
       id: tag_name
       run: echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
+    - name: Create Release
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAG_NAME: ${{ steps.tag_name.outputs.TAG_NAME }}
+      run: |
+        # Idempotency: if `publish-crate` succeeded but a previous run of
+        # this job failed transiently, re-running the workflow must not
+        # double-create the GitHub Release.  crates.io itself is already
+        # idempotent (duplicates = error), so the only thing we need to
+        # guard here is `gh release`.
+        if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+          echo "Release $TAG_NAME already exists, skipping creation."
+        else
+          gh release create "$TAG_NAME" --title "Release $TAG_NAME" --generate-notes
+        fi
+
+  publish-crate:
+    name: Publish to crates.io
+    runs-on: windows-latest
+    # crates.io publishing is only meaningful for non-fork roots
+    if: github.event.repository.fork == false
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write     # Required for OIDC trusted publishing + Sigstore signing
+      attestations: write # Required for `actions/attest` (SLSA build provenance)
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        # The ancestry check below needs enough history to prove the tag
+        # commit is reachable from origin/main.
+        fetch-depth: 0
+
     - name: Verify tag is on main
+      shell: bash
       run: |
         git fetch origin main
         if ! git merge-base --is-ancestor $GITHUB_SHA origin/main; then
@@ -37,46 +79,49 @@ jobs:
           exit 1
         fi
 
+    - name: Install Rust
+      uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+      with:
+        toolchain: stable
+        # Disable the action's default RUSTFLAGS=-D warnings for the
+        # publish dry-run, since new warning lints could have been introduced
+        # between the time CI ran and publish runs. CI is the gate for lint
+        # hygiene, so the release dry-run only needs to validate the *package*
+        # (Cargo.toml, files, build, deps), not relitigate lints.
+        rustflags: ''
+
     - name: Verify version matches tag
+      shell: bash
       run: |
         TAG_VERSION=${GITHUB_REF#refs/tags/v}
-        CARGO_VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+        CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 \
+          | jq -r '.packages[] | select(.name == "wrest") | .version')
         if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
           echo "Error: Tag version (v$TAG_VERSION) doesn't match Cargo.toml version ($CARGO_VERSION)"
           exit 1
         fi
         echo "Version check passed: $CARGO_VERSION"
 
-    - name: Create Release
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: gh release create ${{ steps.tag_name.outputs.TAG_NAME }} --title "Release ${{ steps.tag_name.outputs.TAG_NAME }}" --generate-notes
+    - name: Verify crate package
+      # Also produces target/package/wrest-<version>.crate, which the
+      # attestation step below signs (`cargo package` not needed)
+      run: cargo publish --dry-run --locked --features __all-native-features
 
-  publish-crate:
-    name: Publish to crates.io
-    runs-on: windows-latest
-    # crates.io publishing is only meaningful for non-fork roots
-    if: github.event.repository.fork == false
-    needs: create-release
-    environment: crates-io
-    permissions:
-      id-token: write  # Required for OIDC trusted publishing
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v6
-
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-
-    - name: Cache dependencies
-      uses: Swatinem/rust-cache@v2
+    - name: Attest build provenance
+      # Attests that the `.crate` artifact was produced by this workflow at this commit.
+      # `actions/attest` defaults to SLSA build provenance mode
+      # Verifiable later with:
+      #   `gh attestation verify --repo talagrand/wrest <wrest-x.y.z.crate>`
+      uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+      with:
+        subject-path: target/package/wrest-*.crate
 
     - name: Authenticate with crates.io
-      uses: rust-lang/crates-io-auth-action@v1
+      uses: rust-lang/crates-io-auth-action@bbd81622f20ce9e2dd9622e3218b975523e45bbe # v1.0.4
       id: auth
 
     - name: Publish to crates.io
-      run: cargo publish --features __all-native-features
+      run: cargo publish --locked
       env:
         CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
