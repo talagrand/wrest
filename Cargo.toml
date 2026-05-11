@@ -199,10 +199,10 @@ windows-sys = { version = ">=0.59, <0.62", default-features = false, features = 
     "Win32_Globalization",
     "Win32_Networking_WinHttp",
     "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
 ] }
 futures-channel = "0.3.31"
 futures-util = "0.3.31"
-futures-timer = "3"
 futures-executor = "0.3.31"
 base64 = "0.22"
 

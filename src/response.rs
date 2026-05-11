@@ -203,7 +203,7 @@ impl Response {
                 if remaining.is_zero() {
                     None // timed out
                 } else {
-                    let delay = futures_timer::Delay::new(remaining);
+                    let delay = crate::timer::Delay::new(remaining);
                     let read_future = pin!(read_future);
                     let delay = pin!(delay);
                     match futures_util::future::select(read_future, delay).await {

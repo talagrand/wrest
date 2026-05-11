@@ -296,7 +296,7 @@ impl Client {
 
         // Race against total timeout if configured
         let raw = if let Some(timeout) = remaining_timeout {
-            let delay = futures_timer::Delay::new(timeout);
+            let delay = crate::timer::Delay::new(timeout);
             let send_future = std::pin::pin!(send_future);
             let delay = std::pin::pin!(delay);
 
@@ -362,7 +362,8 @@ impl ClientBuilder {
     ///
     /// This covers the entire request lifecycle -- connection, sending,
     /// and receiving the response (including streaming body reads).
-    /// Implemented via `futures_util::future::select` + `futures_timer::Delay`.
+    /// Implemented via `futures_util::future::select` against a Win32
+    /// threadpool timer (see [`crate::timer::Delay`]).
     ///
     /// Default: **no timeout** (the request can run indefinitely).
     /// WinHTTP enforces a 60-second connect timeout by default;
@@ -985,7 +986,7 @@ impl ClientBuilder {
         // per-operation idle timeout.  Callers can opt in to stall
         // detection via the send_timeout() / read_timeout() extensions.
         // Total end-to-end timeout is enforced separately via
-        // futures_timer::Delay.
+        // crate::timer::Delay (built on the Win32 threadpool).
         let send_timeout_ms = self.send_timeout.map_or(0, to_ms);
         let read_timeout_ms = self.read_timeout.map_or(0, to_ms);
 
