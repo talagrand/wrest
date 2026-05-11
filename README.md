@@ -4,7 +4,7 @@
 
 **Windows-native async HTTP client with a reqwest-compatible API.**
 
-[![CI](https://github.com/talagrand/wrest/workflows/CI/badge.svg)](https://github.com/talagrand/wrest/actions)
+[![CI](https://github.com/talagrand/wrest/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/talagrand/wrest/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![codecov](https://codecov.io/gh/talagrand/wrest/graph/badge.svg)](https://codecov.io/gh/talagrand/wrest)
 [![Crates.io](https://img.shields.io/crates/v/wrest.svg)](https://crates.io/crates/wrest)
 [![Documentation](https://docs.rs/wrest/badge.svg)](https://docs.rs/wrest)
