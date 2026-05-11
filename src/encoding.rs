@@ -492,7 +492,7 @@ mod tests {
         // (name, label, data, expected)
         let cases: &[(&str, &str, &[u8], &str)] = &[
             // -- Pure-Rust paths ---------------------------------
-            ("UTF-8", "utf-8", &[0x63, 0x61, 0x66, 0xC3, 0xA9], "caf\u{00E9}"),
+            ("UTF-8", "utf-8", &[0x63, 0x61, 0x66, 0xC3, 0xA9], "caf\u{00E9}"), // spellchecker:disable-line
             ("UTF-16BE", "utf-16be", &[0x00, 0x48, 0x00, 0x69], "Hi"),
             ("UTF-16LE", "utf-16le", &[0x48, 0x00, 0x69, 0x00], "Hi"),
             ("x-user-defined", "x-user-defined", &[0x48, 0x80, 0xFF], "H\u{F780}\u{F7FF}"),
