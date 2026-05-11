@@ -35,15 +35,15 @@ pub(crate) fn winhttp_open_session(
 }
 
 /// `WinHttpCloseHandle`.
-pub(crate) fn close_winhttp_handle(handle: RawWinHttpHandle) {
+pub(crate) fn close_winhttp_handle(handle: RawWinHttpHandle) -> bool {
     // Guard: most WinHTTP functions, including `WinHttpCloseHandle`,
     // trigger a STATUS_ACCESS_VIOLATION when passed a null handle
     // instead of returning an error code.  Always check before calling.
-    if !handle.is_null() {
-        unsafe {
-            WinHttpCloseHandle(handle);
-        }
+    if handle.is_null() {
+        return false;
     }
+
+    unsafe { WinHttpCloseHandle(handle) != 0 }
 }
 
 /// `WinHttpSetStatusCallback` -- install a status callback on a handle.

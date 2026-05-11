@@ -196,7 +196,7 @@ impl Response {
                 .as_ref()
                 .ok_or_else(|| Error::body("response body already consumed"))?;
 
-            let read_future = winhttp::read_chunk(&raw.state, &raw.request_handle, &raw.url);
+            let read_future = winhttp::read_chunk(&raw.request_handle, &raw.url);
 
             if let Some(deadline) = self.deadline {
                 let remaining = deadline.saturating_duration_since(Instant::now());

@@ -16,47 +16,122 @@
 use crate::util::lock_or_clear;
 use futures_channel::oneshot;
 use std::{
+    marker::PhantomData,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
 };
 
 // ---------------------------------------------------------------------------
-// CallbackContext -- safe Arc <-> usize lifecycle
+// CallbackContext -- RAII Arc <-> usize lifecycle
 // ---------------------------------------------------------------------------
 
-/// Leak an `Arc` reference as a raw `usize`, suitable for passing as
-/// `dwContext` / `DWORD_PTR` to a Win32 API.
+/// RAII wrapper that parks an `Arc<T>` as a raw `usize` for use as a
+/// Win32 callback context (`DWORD_PTR` / `PVOID`).
 ///
-/// Increments the Arc's strong count. The caller **must** eventually call
-/// [`reclaim_context_ptr`] exactly once to balance this.
-pub fn leak_context_ptr<T>(arc: &Arc<T>) -> usize {
-    Arc::into_raw(Arc::clone(arc)) as usize
+/// `new` clones the input `Arc` and converts it to a raw pointer, so the
+/// strong count is incremented by exactly one.  The matching decrement
+/// happens automatically when this value is dropped, **unless** ownership
+/// has been transferred to the OS via [`Self::into_raw`] (in which case
+/// the OS callback that owns the retained reference must call
+/// [`Self::drop_raw`] exactly once when it has finished).
+///
+/// Inside a callback, recover the value with [`Self::borrow_raw`] (no
+/// refcount change) or [`Self::clone_arc_from_raw`] (extra strong ref
+/// for the duration of the callback).
+///
+/// Auto-traits are inherited from `Arc<T>` via `PhantomData`, so
+/// `CallbackContext<T>: Send + Sync` iff `T: Send + Sync` -- matching
+/// the semantics of the strong reference it owns.
+pub(crate) struct CallbackContext<T> {
+    raw: usize,
+    _marker: PhantomData<Arc<T>>,
 }
 
-/// Borrow the value behind a context pointer inside a callback.
-///
-/// Returns a reference valid for the duration of the callback invocation.
-/// Does **not** change the reference count.
-///
-/// # Safety
-/// - `ptr` must have been returned by [`leak_context_ptr`].
-/// - The matching [`reclaim_context_ptr`] must not have been called yet.
-pub unsafe fn borrow_context_ptr<'a, T>(ptr: usize) -> &'a T {
-    unsafe { &*(ptr as *const T) }
+impl<T> CallbackContext<T> {
+    /// Clone `arc` and park the clone as a raw `usize`.
+    ///
+    /// Increments the inner strong count by one.
+    pub fn new(arc: &Arc<T>) -> Self {
+        Self {
+            raw: Arc::into_raw(Arc::clone(arc)) as usize,
+            _marker: PhantomData,
+        }
+    }
+
+    /// The raw pointer bits, suitable for passing as a Win32 `DWORD_PTR`
+    /// / `PVOID` callback context.
+    pub fn as_raw(&self) -> usize {
+        self.raw
+    }
+
+    /// Consume `self` **without** decrementing the strong count.
+    ///
+    /// Use this when ownership of the retained reference is transferred
+    /// to an OS callback whose final invocation will call
+    /// [`Self::drop_raw`].  Until that final callback runs, the
+    /// `Arc<T>` stays alive.
+    pub fn into_raw(self) -> usize {
+        let raw = self.raw;
+        std::mem::forget(self);
+        raw
+    }
+
+    /// Borrow the inner value behind a raw context pointer.
+    ///
+    /// Returns a reference valid for the duration of the callback
+    /// invocation.  Does **not** change the reference count.
+    ///
+    /// # Safety
+    /// - `raw` must have been produced by [`Self::new`] (or
+    ///   [`Self::into_raw`]) and not yet dropped via [`Self::drop_raw`].
+    pub unsafe fn borrow_raw<'a>(raw: usize) -> &'a T {
+        unsafe { &*(raw as *const T) }
+    }
+
+    /// Clone the underlying `Arc<T>` from a raw context pointer.
+    ///
+    /// Increments the strong count by one; the original retained
+    /// reference is untouched.  Useful when a callback needs to keep
+    /// the value alive across an action that may invalidate the raw
+    /// pointer (e.g. the final callback calling [`Self::drop_raw`]).
+    ///
+    /// # Safety
+    /// - `raw` must have been produced by [`Self::new`] (or
+    ///   [`Self::into_raw`]) and not yet dropped via [`Self::drop_raw`].
+    pub unsafe fn clone_arc_from_raw(raw: usize) -> Arc<T> {
+        unsafe {
+            let ptr = raw as *const T;
+            Arc::increment_strong_count(ptr);
+            Arc::from_raw(ptr)
+        }
+    }
+
+    /// Drop a raw context pointer, releasing the retained strong ref.
+    ///
+    /// Use this from the **final** OS callback (e.g.,
+    /// `WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING`) that owns a context
+    /// previously released via [`Self::into_raw`].
+    ///
+    /// # Safety
+    /// - `raw` must have been produced by [`Self::new`] (or
+    ///   [`Self::into_raw`]) and not yet dropped via this function.
+    /// - Must be called exactly once per retained reference.
+    pub unsafe fn drop_raw(raw: usize) {
+        unsafe {
+            drop(Arc::from_raw(raw as *const T));
+        }
+    }
 }
 
-/// Reclaim the leaked `Arc`, decrementing the strong count.
-///
-/// Call this exactly once, from the **final** callback (e.g.,
-/// `WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING`, COM release, etc.).
-///
-/// # Safety
-/// - `ptr` must have been returned by [`leak_context_ptr`].
-/// - Must be called exactly once per [`leak_context_ptr`] call.
-pub unsafe fn reclaim_context_ptr<T>(ptr: usize) {
-    unsafe {
-        drop(Arc::from_raw(ptr as *const T));
+impl<T> Drop for CallbackContext<T> {
+    fn drop(&mut self) {
+        // SAFETY: `self.raw` was produced in `new` and not yet released.
+        // The only consuming exit (`into_raw`) `mem::forget`s `self`
+        // before this `Drop` can run.
+        unsafe {
+            drop(Arc::from_raw(self.raw as *const T));
+        }
     }
 }
 
@@ -240,19 +315,45 @@ mod tests {
     }
 
     #[test]
-    fn context_ptr_round_trip() {
+    fn callback_context_drop_releases() {
         let state = Arc::new(String::from("hello"));
-        let raw = leak_context_ptr(&state);
+        let ctx = CallbackContext::<String>::new(&state);
         assert_eq!(Arc::strong_count(&state), 2);
 
+        // SAFETY: `ctx` is live and `raw` came from it.
         unsafe {
-            let s: &String = borrow_context_ptr(raw);
+            let s: &String = CallbackContext::<String>::borrow_raw(ctx.as_raw());
             assert_eq!(s, "hello");
-
-            reclaim_context_ptr::<String>(raw);
         }
+
+        // Drop releases the retained strong ref automatically.
+        drop(ctx);
         assert_eq!(Arc::strong_count(&state), 1);
         assert_eq!(*state, "hello"); // Still valid
+    }
+
+    #[test]
+    fn callback_context_into_raw_skips_drop() {
+        let state = Arc::new(String::from("hello"));
+        let ctx = CallbackContext::<String>::new(&state);
+        assert_eq!(Arc::strong_count(&state), 2);
+
+        // Caller asserts an OS callback now owns the retained reference.
+        let raw = ctx.into_raw();
+        assert_eq!(Arc::strong_count(&state), 2);
+
+        // SAFETY: the retained reference is still alive (we just forgot
+        // the wrapper), so cloning the inner `Arc` is sound.
+        let extra = unsafe { CallbackContext::<String>::clone_arc_from_raw(raw) };
+        assert_eq!(Arc::strong_count(&state), 3);
+        drop(extra);
+        assert_eq!(Arc::strong_count(&state), 2);
+
+        // SAFETY: `raw` is still the live retained reference; drop it
+        // exactly once.
+        unsafe { CallbackContext::<String>::drop_raw(raw) };
+        assert_eq!(Arc::strong_count(&state), 1);
+        assert_eq!(*state, "hello");
     }
 
     /// Custom error type for testing `await_win32`.
