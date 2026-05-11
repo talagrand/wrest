@@ -44,6 +44,10 @@ mod response;
 #[cfg(native_winhttp)]
 pub mod retry;
 #[cfg(native_winhttp)]
+pub(crate) mod threadpool;
+#[cfg(native_winhttp)]
+mod timer;
+#[cfg(native_winhttp)]
 pub(crate) mod url;
 #[cfg(native_winhttp)]
 pub(crate) mod util;
