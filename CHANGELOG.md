@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 - DLL-host safety: replaced `futures-timer` with a Win32-threadpool-backed `Delay` so the library no longer leaves a parked helper thread behind when a host process calls `FreeLibrary` on wrest. `futures-timer` remains as a dev-dependency for examples.
+- DLL-host safety: WinHTTP request handles now drain in-flight callbacks during `Drop`, so an OS callback can no longer fire into unmapped code after a host drops the response and unloads the library. `WinHttpRequestHandle::drop` blocks until both `WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING` has been delivered and no other callback is active for the handle.
 
 ### Changed
 - Release - Supply chain: SHA-pin all actions in the release workflow. Minimize default permissions with per-job-scoped writes.

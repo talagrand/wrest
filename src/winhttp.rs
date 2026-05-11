@@ -7,10 +7,7 @@
 use crate::{
     Body, abi,
     body::BodyInner,
-    callback::{
-        CompletionSignal, SignalCancelled, await_win32, borrow_context_ptr, leak_context_ptr,
-        reclaim_context_ptr,
-    },
+    callback::{CallbackContext, CompletionSignal, SignalCancelled, await_win32},
     error::{ContextError, Error},
     proxy::{ProxyAction, ProxyConfig},
     redirect::{self, Policy},
@@ -20,7 +17,7 @@ use crate::{
 use bytes::BytesMut;
 use http::{StatusCode, Version};
 use std::sync::{
-    Arc, Mutex,
+    Arc, Condvar, Mutex,
     atomic::{AtomicU32, Ordering},
 };
 use windows_sys::Win32::Networking::WinHttp::*;
@@ -67,6 +64,45 @@ impl SendPtr {
     }
 }
 
+/// Close/drain state for one request handle.
+struct RequestCloseState {
+    closed: bool,
+    active_callbacks: usize,
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static WINHTTP_CALLBACK_STACK: std::cell::RefCell<Vec<usize>> =
+    const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(debug_assertions)]
+struct WinHttpCallbackStackGuard {
+    request: usize,
+}
+
+#[cfg(debug_assertions)]
+impl WinHttpCallbackStackGuard {
+    fn enter(request: usize) -> Self {
+        WINHTTP_CALLBACK_STACK.with(|stack| stack.borrow_mut().push(request));
+        Self { request }
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for WinHttpCallbackStackGuard {
+    fn drop(&mut self) {
+        WINHTTP_CALLBACK_STACK.with(|stack| {
+            let popped = stack.borrow_mut().pop();
+            debug_assert_eq!(
+                popped,
+                Some(self.request),
+                "WinHTTP callback stack tracking became unbalanced"
+            );
+        });
+    }
+}
+
 /// RAII wrapper for a raw WinHTTP handle (`*mut c_void`).
 ///
 /// Calls `WinHttpCloseHandle` on drop. After the close, WinHTTP may still
@@ -74,18 +110,18 @@ impl SendPtr {
 pub(crate) struct WinHttpHandle(pub *mut core::ffi::c_void);
 
 impl WinHttpHandle {
-    /// Get a `Send`-safe copy of the raw pointer (as `usize`).
-    ///
-    /// This allows passing the handle value into closures captured across
-    /// `.await` points without making the future `!Send`.
-    fn as_send(&self) -> SendPtr {
-        SendPtr(self.0 as usize)
+    /// Convert this generic handle into a request handle that waits for
+    /// `HANDLE_CLOSING` before drop returns.
+    fn into_request_handle(mut self, state: Arc<RequestState>) -> WinHttpRequestHandle {
+        let handle = self.0;
+        self.0 = std::ptr::null_mut();
+        WinHttpRequestHandle { handle, state }
     }
 }
 
 impl Drop for WinHttpHandle {
     fn drop(&mut self) {
-        abi::close_winhttp_handle(self.0);
+        let _ = abi::close_winhttp_handle(self.0);
     }
 }
 
@@ -154,7 +190,7 @@ impl CallbackEvent {
 
 /// Shared state for one in-flight HTTP request.
 ///
-/// Passed as `dwContext` to WinHTTP via [`leak_context_ptr`].
+/// Passed as `dwContext` to WinHTTP via a [`CallbackContext<RequestState>`].
 pub(crate) struct RequestState {
     /// The completion bridge -- callback signals, future awaits.
     pub signal: CompletionSignal<CallbackEvent>,
@@ -163,6 +199,9 @@ pub(crate) struct RequestState {
     pub verbose: bool,
     /// TLS failure detail flags captured from `SECURE_FAILURE` callback.
     pub tls_failure_flags: AtomicU32,
+    /// Close/drain state for the request handle.
+    close_state: Mutex<RequestCloseState>,
+    close_idle: Condvar,
     /// Buffer for the current in-flight `WinHttpReadData`.
     /// Stored here (not on the future stack) so it survives future-drop.
     pub read_buffer: Mutex<Option<BytesMut>>,
@@ -187,11 +226,134 @@ impl RequestState {
             signal: CompletionSignal::new(),
             verbose,
             tls_failure_flags: AtomicU32::new(0),
+            close_state: Mutex::new(RequestCloseState {
+                closed: false,
+                active_callbacks: 0,
+            }),
+            close_idle: Condvar::new(),
             read_buffer: Mutex::new(None),
             send_body: Mutex::new(None),
         }
     }
+
+    fn enter_callback(&self) -> RequestCallbackGuard<'_> {
+        let mut close_state = self.lock_close_state();
+        close_state.active_callbacks += 1;
+        RequestCallbackGuard { request: self }
+    }
+
+    fn mark_final_callback_seen(&self) {
+        let mut close_state = self.lock_close_state();
+        close_state.closed = true;
+        if close_state.active_callbacks == 0 {
+            self.close_idle.notify_all();
+        }
+    }
+
+    fn wait_closed_and_idle(&self) {
+        let mut close_state = self.lock_close_state();
+        while !close_state.closed || close_state.active_callbacks != 0 {
+            close_state = match self.close_idle.wait(close_state) {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    warn!("WinHTTP request close-state mutex poisoned while waiting; recovering");
+                    self.close_state.clear_poison();
+                    poisoned.into_inner()
+                }
+            };
+        }
+    }
+
+    fn lock_close_state(&self) -> std::sync::MutexGuard<'_, RequestCloseState> {
+        match self.close_state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("WinHTTP request close-state mutex poisoned; recovering");
+                self.close_state.clear_poison();
+                poisoned.into_inner()
+            }
+        }
+    }
 }
+
+struct RequestCallbackGuard<'a> {
+    request: &'a RequestState,
+}
+
+impl RequestCallbackGuard<'_> {
+    fn mark_final_callback_seen(&self) {
+        self.request.mark_final_callback_seen();
+    }
+}
+
+impl Drop for RequestCallbackGuard<'_> {
+    fn drop(&mut self) {
+        let mut close_state = self.request.lock_close_state();
+        if close_state.active_callbacks == 0 {
+            warn!("WinHTTP callback activity underflow; ignoring duplicate exit");
+            return;
+        }
+        close_state.active_callbacks -= 1;
+        if close_state.closed && close_state.active_callbacks == 0 {
+            self.request.close_idle.notify_all();
+        }
+    }
+}
+
+/// RAII wrapper for an in-flight WinHTTP request handle.
+///
+/// `Drop` calls `WinHttpCloseHandle` and then blocks until both:
+///
+/// 1. WinHTTP has delivered `WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING` (the
+///    final callback for this request); and
+/// 2. no other WinHTTP callback is currently active for this request.
+///
+/// After `Drop` returns, no WinHTTP callback can re-enter this DLL for
+/// this request -- the DLL-unload invariant the native backend depends
+/// on.
+pub(crate) struct WinHttpRequestHandle {
+    handle: *mut core::ffi::c_void,
+    state: Arc<RequestState>,
+}
+
+impl WinHttpRequestHandle {
+    /// Get a `Send`-safe copy of the raw pointer (as `usize`).
+    fn as_send(&self) -> SendPtr {
+        SendPtr(self.handle as usize)
+    }
+
+    /// Get the raw WinHTTP request handle.
+    fn raw(&self) -> *mut core::ffi::c_void {
+        self.handle
+    }
+}
+
+impl Drop for WinHttpRequestHandle {
+    fn drop(&mut self) {
+        #[cfg(debug_assertions)]
+        {
+            let request = Arc::as_ptr(&self.state) as usize;
+            WINHTTP_CALLBACK_STACK.with(|stack| {
+                debug_assert!(
+                    !stack.borrow().contains(&request),
+                    "WinHttpRequestHandle dropped while inside its own WinHTTP callback; \
+                     this suggests an executor/waker synchronously polled from wake"
+                );
+            });
+        }
+
+        if abi::close_winhttp_handle(self.handle) {
+            self.state.wait_closed_and_idle();
+        }
+        self.handle = std::ptr::null_mut();
+    }
+}
+
+// SAFETY: WinHTTP request handles are thread-safe. All WinHTTP functions
+// accept handles from any thread, and the callback fires on WinHTTP's own
+// thread pool.
+unsafe impl Send for WinHttpRequestHandle {}
+unsafe impl Sync for WinHttpRequestHandle {}
 
 // SAFETY: `RequestState` is shared across the async future and the WinHTTP
 // callback thread. All fields are protected by `Mutex`, `AtomicU32`, or are
@@ -206,13 +368,13 @@ unsafe impl Sync for RequestState {}
 /// WinHTTP status callback function.
 ///
 /// This is registered via `WinHttpSetStatusCallback` on the session handle and
-/// inherited by all child handles. It uses `borrow_context_ptr` to access the
-/// per-request `RequestState` and signals the `CompletionSignal`.
+/// inherited by all child handles. It uses [`CallbackContext::borrow_raw`] to
+/// access the per-request `RequestState` and signals the `CompletionSignal`.
 ///
 /// # Safety
 ///
-/// Called by WinHTTP on its internal thread pool. `dw_context` must be a value
-/// returned by `leak_context_ptr::<RequestState>`.
+/// Called by WinHTTP on its internal thread pool. `dw_context` must be the
+/// raw pointer from a live [`CallbackContext<RequestState>`].
 pub(crate) unsafe extern "system" fn winhttp_callback(
     _hinternet: *mut core::ffi::c_void,
     dw_context: usize,
@@ -224,7 +386,24 @@ pub(crate) unsafe extern "system" fn winhttp_callback(
         return;
     }
 
-    let state: &RequestState = unsafe { borrow_context_ptr(dw_context) };
+    #[cfg(debug_assertions)]
+    let _callback_stack_guard = WinHttpCallbackStackGuard::enter(dw_context);
+
+    if dw_status == WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING {
+        // Take a strong ref so `mark_final_callback_seen` can run after
+        // the retained context is released.
+        let state: Arc<RequestState> =
+            unsafe { CallbackContext::<RequestState>::clone_arc_from_raw(dw_context) };
+        let callback_guard = state.enter_callback();
+        callback_guard.mark_final_callback_seen();
+        // SAFETY: This is the final callback for this retained context.
+        unsafe { CallbackContext::<RequestState>::drop_raw(dw_context) };
+        drop(callback_guard);
+        return;
+    }
+
+    let state: &RequestState = unsafe { CallbackContext::<RequestState>::borrow_raw(dw_context) };
+    let _callback_guard = state.enter_callback();
 
     match dw_status {
         WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE => {
@@ -266,10 +445,6 @@ pub(crate) unsafe extern "system" fn winhttp_callback(
             state.tls_failure_flags.store(flags, Ordering::Release);
             // Don't signal -- the subsequent REQUEST_ERROR will carry the error.
         }
-
-        WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING => unsafe {
-            reclaim_context_ptr::<RequestState>(dw_context);
-        },
 
         // Verbose logging for connection-level events
         #[cfg(feature = "tracing")]
@@ -484,9 +659,7 @@ impl WinHttpSession {
 /// The raw response data after headers are received.
 pub(crate) struct RawResponse {
     /// The request handle (caller takes ownership for streaming body reads).
-    pub request_handle: WinHttpHandle,
-    /// Shared state for the request (holds the signal + read buffer).
-    pub state: Arc<RequestState>,
+    pub request_handle: WinHttpRequestHandle,
     /// HTTP status code.
     pub status: StatusCode,
     /// HTTP version.
@@ -562,22 +735,17 @@ pub(crate) async fn execute_request(
     // Drop the raw request handle pointer so it does not live across await points
     let _ = h_request;
 
-    // Leak context pointer for the callback
-    let ctx = leak_context_ptr(&state);
-    if let Err(e) =
-        abi::winhttp_set_option_usize(request_handle.0, WINHTTP_OPTION_CONTEXT_VALUE, ctx)
-    {
-        // Reclaim the leaked Arc before propagating.  The HANDLE_CLOSING
-        // callback cannot do this because the context was never associated
-        // with the handle, so `dw_context` will be 0.
-        //
-        // SAFETY: `ctx` was returned by `leak_context_ptr` immediately above
-        // and no callback has been delivered for it (the context was never set).
-        unsafe {
-            reclaim_context_ptr::<RequestState>(ctx);
-        }
-        return Err(e.with_url(url.clone()));
-    }
+    // Park a context strong ref for the WinHTTP callback.  If
+    // `winhttp_set_option_usize` fails, `ctx`'s `Drop` releases the
+    // retained ref; on success, the WinHTTP `HANDLE_CLOSING` callback
+    // owns it, so we suppress the local `Drop` with `into_raw`.
+    let ctx = CallbackContext::<RequestState>::new(&state);
+    abi::winhttp_set_option_usize(request_handle.0, WINHTTP_OPTION_CONTEXT_VALUE, ctx.as_raw())
+        .map_err(|e| e.with_url(url.clone()))?;
+    // Ownership transferred to WinHTTP; `HANDLE_CLOSING` will release.
+    let _ = ctx.into_raw();
+
+    let request_handle = request_handle.into_request_handle(Arc::clone(&state));
 
     // Apply per-request proxy override.
     // The session was opened with a single proxy URL, but the resolved
@@ -585,15 +753,15 @@ pub(crate) async fn execute_request(
     // NO_PROXY match -> direct).
     match &per_request_proxy {
         ProxyAction::Direct => {
-            abi::winhttp_set_proxy_direct(request_handle.0).url_context(url)?;
+            abi::winhttp_set_proxy_direct(request_handle.raw()).url_context(url)?;
         }
         ProxyAction::Named(proxy_url, proxy_creds) => {
             // Override the session-level proxy for this specific request.
-            abi::winhttp_set_proxy_named(request_handle.0, proxy_url).url_context(url)?;
+            abi::winhttp_set_proxy_named(request_handle.raw(), proxy_url).url_context(url)?;
 
             // Set proxy Basic-auth credentials if provided.
             if let Some((username, password)) = proxy_creds {
-                abi::winhttp_set_proxy_credentials(request_handle.0, username, password)
+                abi::winhttp_set_proxy_credentials(request_handle.raw(), username, password)
                     .url_context(url)?;
             }
         }
@@ -609,7 +777,7 @@ pub(crate) async fn execute_request(
             | SECURITY_FLAG_IGNORE_CERT_CN_INVALID
             | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
         abi::winhttp_set_option_u32(
-            request_handle.0,
+            request_handle.raw(),
             WINHTTP_OPTION_SECURITY_FLAGS,
             security_flags,
         )
@@ -619,7 +787,7 @@ pub(crate) async fn execute_request(
     // Add custom headers
     for (name, value) in headers {
         let header_line = format!("{name}: {value}\r\n");
-        abi::winhttp_add_request_header(request_handle.0, &header_line).url_context(url)?;
+        abi::winhttp_add_request_header(request_handle.raw(), &header_line).url_context(url)?;
     }
 
     // Send request.  Three body paths:
@@ -673,7 +841,7 @@ pub(crate) async fn execute_request(
         //     0\r\n\r\n
 
         // Tell WinHTTP the body length is unknown.
-        abi::winhttp_add_request_header(request_handle.0, "Transfer-Encoding: chunked\r\n")
+        abi::winhttp_add_request_header(request_handle.raw(), "Transfer-Encoding: chunked\r\n")
             .url_context(url)?;
 
         let h_send = request_handle.as_send();
@@ -772,7 +940,7 @@ pub(crate) async fn execute_request(
         // See "Support for Greater Than 4-GB Upload" in the
         // WinHttpSendRequest documentation.
         abi::winhttp_add_request_header(
-            request_handle.0,
+            request_handle.raw(),
             &format!("Content-Length: {body_len}\r\n"),
         )
         .url_context(url)?;
@@ -834,18 +1002,18 @@ pub(crate) async fn execute_request(
     let _ = lock_or_clear(&state.send_body).take();
 
     // Query status code
-    let status = query_status_code(request_handle.0, url)?;
+    let status = query_status_code(request_handle.raw(), url)?;
 
     // Query HTTP version
-    let version = query_version(request_handle.0);
+    let version = query_version(request_handle.raw());
 
     // Query response headers
-    let headers = query_headers(request_handle.0, url)?;
+    let headers = query_headers(request_handle.raw(), url)?;
 
     // Query the final URL after any redirects.  WinHTTP handles redirects
     // internally, so WINHTTP_OPTION_URL returns the URL of the last request
     // in the chain (matching reqwest's `Response::url()` behavior).
-    let final_url = abi::winhttp_query_option_url(request_handle.0, WINHTTP_OPTION_URL)
+    let final_url = abi::winhttp_query_option_url(request_handle.raw(), WINHTTP_OPTION_URL)
         .and_then(|s| Url::parse(&s).ok())
         .unwrap_or_else(|| url.clone());
 
@@ -862,7 +1030,6 @@ pub(crate) async fn execute_request(
     // confirm the request handle remains valid after the connect handle closes.
     Ok(RawResponse {
         request_handle,
-        state,
         status,
         version,
         url: final_url,
@@ -876,7 +1043,7 @@ pub(crate) async fn execute_request(
 /// operation (typically stored in `state.send_body` for cancellation safety).
 async fn write_data(
     signal: &CompletionSignal<CallbackEvent>,
-    handle: &WinHttpHandle,
+    handle: &WinHttpRequestHandle,
     data_ptr: usize,
     data_len: u32,
     url: &Url,
@@ -895,10 +1062,11 @@ async fn write_data(
 /// Returns `Ok(None)` at EOF. The returned `bytes::Bytes` is zero-copy -- WinHTTP
 /// writes directly into a `BytesMut` which is then frozen.
 pub(crate) async fn read_chunk(
-    state: &Arc<RequestState>,
-    handle: &WinHttpHandle,
+    handle: &WinHttpRequestHandle,
     url: &Url,
 ) -> Result<Option<bytes::Bytes>, Error> {
+    let state = &handle.state;
+
     // Allocate a fixed 8 KiB buffer.  WinHttpReadData behaves like recv():
     // it returns as soon as *any* data arrives (the buffer size is a maximum,
     // not a target) and signals EOF via ReadComplete(0).  A single ReadData

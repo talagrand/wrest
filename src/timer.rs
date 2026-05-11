@@ -15,8 +15,8 @@
 //!    standard Win32 drain sequence (`SetThreadpoolTimer(_, NULL)` ->
 //!    `WaitForThreadpoolTimerCallbacks(_, TRUE)` -> `CloseThreadpoolTimer`),
 //!    then
-//! 2. reclaims the leaked context `Arc` that was passed to the OS as the
-//!    callback's context.
+//! 2. drops the [`CallbackContext`], which releases the retained
+//!    context `Arc` that was passed to the OS as the callback's context.
 //!
 //! After the inner `ThreadpoolTimer` is dropped, no callback can re-enter
 //! this DLL.  Hosts that drain outstanding
@@ -32,10 +32,7 @@
 //! provides via `tokio::time::sleep`.
 
 use crate::{
-    callback::{
-        CompletionFuture, CompletionSignal, borrow_context_ptr, leak_context_ptr,
-        reclaim_context_ptr,
-    },
+    callback::{CallbackContext, CompletionFuture, CompletionSignal},
     threadpool::ThreadpoolTimer,
 };
 use std::{
@@ -53,8 +50,8 @@ use windows_sys::Win32::System::Threading::{PTP_CALLBACK_INSTANCE, PTP_TIMER};
 
 /// Heap state shared between the `Delay` future and the threadpool
 /// callback.  Lives in an `Arc` whose strong count is held by the
-/// `Delay` (for polling) plus a leaked clone passed as the timer
-/// callback's context (reclaimed in `Drop`).
+/// `Delay` (for polling) plus a retained clone passed as the timer
+/// callback's context (released in `Drop`).
 struct TimerState {
     signal: CompletionSignal<()>,
 }
@@ -108,10 +105,11 @@ mod debug {
 ///
 /// # Safety
 ///
-/// Invoked by the OS with the leaked `Arc<TimerState>` pointer that
+/// Invoked by the OS with the retained `Arc<TimerState>` pointer that
 /// [`Delay::new`] passed to `CreateThreadpoolTimer`.  That pointer
-/// remains valid until `Drop` (after `WaitForThreadpoolTimerCallbacks`
-/// returns) calls [`reclaim_context_ptr`].
+/// remains valid until `Delay::drop` (after
+/// `WaitForThreadpoolTimerCallbacks` returns) drops the
+/// [`CallbackContext`], which releases the strong reference.
 unsafe extern "system" fn timer_callback(
     _instance: PTP_CALLBACK_INSTANCE,
     context: *mut core::ffi::c_void,
@@ -123,11 +121,11 @@ unsafe extern "system" fn timer_callback(
     #[cfg(debug_assertions)]
     let _callback_stack_guard = debug::TimerCallbackStackGuard::enter(timer);
 
-    // SAFETY: `context` is the value `leak_context_ptr` returned for our
-    // `Arc<TimerState>`; it stays valid for the lifetime of the timer
-    // object, and `Drop` waits for this callback to finish before
-    // reclaiming it.
-    let state: &TimerState = unsafe { borrow_context_ptr(context as usize) };
+    // SAFETY: `context` is the raw pointer from the live
+    // `CallbackContext<TimerState>` owned by `Delay`; it stays valid
+    // for the lifetime of the timer object, and `Delay::drop` waits
+    // for this callback to finish before releasing it.
+    let state: &TimerState = unsafe { CallbackContext::<TimerState>::borrow_raw(context as usize) };
     state.signal.signal(());
 }
 
@@ -138,8 +136,8 @@ unsafe extern "system" fn timer_callback(
 /// A future that resolves after a specified duration.
 ///
 /// Drop-in replacement for `futures_timer::Delay`.  Built on the Win32
-/// default-process threadpool so this library never owns a timer thread --
-/// critical for hosts that may unload the module via `FreeLibrary`.
+/// default-process threadpool so this library never owns a timer thread
+/// that it needs to manage.
 ///
 /// `Delay` is `Send` automatically: every field is `Send`, including
 /// the [`ThreadpoolTimer`] handle (the OS documents `PTP_TIMER` as
@@ -149,13 +147,13 @@ pub(crate) struct Delay {
     /// future is permanently `Pending` and `Drop` is a no-op for the
     /// timer object.
     timer: Option<ThreadpoolTimer>,
-    /// Leaked `Arc<TimerState>` pointer, if a timer was successfully
-    /// created.  Reclaimed in `Drop` after `ThreadpoolTimer`'s own
-    /// `Drop` has drained any in-flight callback.
-    leaked_ctx: Option<usize>,
+    /// Retained `Arc<TimerState>` strong reference, if a timer was
+    /// successfully created.  Its `Drop` releases the reference after
+    /// `ThreadpoolTimer`'s own `Drop` has drained any in-flight callback.
+    callback_ctx: Option<CallbackContext<TimerState>>,
     /// Defensive strong reference to the same `TimerState`.  Required
     /// for the `CreateThreadpoolTimer`-failure path where there is no
-    /// `leaked_ctx` to keep the signal's sender alive; without it the
+    /// `callback_ctx` to keep the signal's sender alive; without it the
     /// receiver in `listener` would see immediate cancellation and
     /// `poll` would treat that as "timer fired".  Also acts as belt-and-
     /// braces in the success path against future Drop-ordering refactors.
@@ -180,9 +178,8 @@ impl Delay {
     /// # Resolution
     ///
     /// Windows scheduler resolution is ~15.6 ms by default (1 ms with
-    /// `timeBeginPeriod`).  Sub-millisecond `dur` values round **up** to
-    /// the current timer tick; this matches `futures_timer::Delay`'s
-    /// behaviour, which is also bounded by the OS scheduler.
+    /// `timeBeginPeriod`).  Sub-millisecond `dur` values round *up* to
+    /// the current timer tick.
     pub(crate) fn new(dur: Duration) -> Self {
         let state = Arc::new(TimerState {
             signal: CompletionSignal::new(),
@@ -191,13 +188,16 @@ impl Delay {
         // callback (very short duration) cannot race ahead of us.
         let listener = state.signal.listen();
 
-        let leaked_ctx = leak_context_ptr(&state);
+        let callback_ctx = CallbackContext::<TimerState>::new(&state);
 
         // SAFETY: `timer_callback` matches `PTP_TIMER_CALLBACK`'s ABI;
-        // `leaked_ctx` keeps the `Arc<TimerState>` alive until `Drop`
-        // reclaims it after draining callbacks.
+        // `callback_ctx` keeps the `Arc<TimerState>` alive until `Drop`
+        // releases it after draining callbacks.
         let timer = unsafe {
-            ThreadpoolTimer::new(Some(timer_callback), leaked_ctx as *mut core::ffi::c_void)
+            ThreadpoolTimer::new(
+                Some(timer_callback),
+                callback_ctx.as_raw() as *mut core::ffi::c_void,
+            )
         };
 
         match timer {
@@ -212,25 +212,24 @@ impl Delay {
 
                 Self {
                     timer: Some(t),
-                    leaked_ctx: Some(leaked_ctx),
+                    callback_ctx: Some(callback_ctx),
                     _state: state,
                     listener,
                     fired: false,
                 }
             }
             None => {
-                // CreateThreadpoolTimer failed; reclaim the leaked Arc
-                // immediately and return a permanently-pending future.
-                // SAFETY: `leaked_ctx` was just produced by
-                // `leak_context_ptr` and has not been observed elsewhere.
-                unsafe { reclaim_context_ptr::<TimerState>(leaked_ctx) };
+                // CreateThreadpoolTimer failed; `callback_ctx` is
+                // dropped here, releasing the strong ref.  The returned
+                // future is permanently pending.
+                drop(callback_ctx);
                 warn!(
                     "wrest::timer::Delay: CreateThreadpoolTimer failed; \
                      timeout will not fire (request will run unbounded)"
                 );
                 Self {
                     timer: None,
-                    leaked_ctx: None,
+                    callback_ctx: None,
                     _state: state,
                     listener,
                     fired: false,
@@ -284,18 +283,16 @@ impl Drop for Delay {
             });
         }
 
-        // Drop the `ThreadpoolTimer`.  Its `Drop` impl is the DLL-safe
-        // teardown: stop scheduling -> wait for in-flight callbacks ->
+        // Drop the `ThreadpoolTimer`.  Its `Drop` impl follows:
+        // stop scheduling -> wait for in-flight callbacks ->
         // close the timer object.  When this returns, no callback can
-        // dereference the leaked context Arc.
+        // dereference the context Arc.
         drop(timer);
 
-        if let Some(ctx) = self.leaked_ctx.take() {
-            // SAFETY: `ctx` was produced by `leak_context_ptr` in `new`
-            // and has not been reclaimed.  The drain above guarantees
-            // no callback can dereference it.
-            unsafe { reclaim_context_ptr::<TimerState>(ctx) };
-        }
+        // The drain above guarantees no callback can dereference the
+        // pointer, so it is safe to drop the `CallbackContext`
+        // (which releases the strong ref).
+        let _ = self.callback_ctx.take();
     }
 }
 
