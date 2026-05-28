@@ -415,4 +415,59 @@ mod tests {
             Poll::Pending => panic!("Delay re-polled after Ready returned Pending"),
         }
     }
+
+    /// Covers timer_callback: direct dispatch - is_null early return and valid-context signal path.
+    #[test]
+    fn timer_callback_dispatch_table() {
+        enum TimerOutcome {
+            Signaled,
+            Pending,
+        }
+
+        // (label, supply_valid_context, expected outcome on the listener)
+        let cases: &[(&str, bool, TimerOutcome)] = &[
+            ("NULL context -> early return, no signal", false, TimerOutcome::Pending),
+            ("valid context -> signals listener", true, TimerOutcome::Signaled),
+        ];
+
+        for (label, supply_ctx, expected) in cases {
+            let state = Arc::new(TimerState {
+                signal: CompletionSignal::new(),
+            });
+            let listener = state.signal.listen();
+            // Hold the retained ref; drop after the call (no drop_raw here).
+            let ctx = CallbackContext::<TimerState>::new(&state);
+
+            let raw_ctx: *mut core::ffi::c_void = if *supply_ctx {
+                ctx.as_raw() as *mut core::ffi::c_void
+            } else {
+                std::ptr::null_mut()
+            };
+
+            // SAFETY: `ctx` keeps Arc alive when supplied; null path returns
+            // early.  `timer` is by-value, only used as a stack-guard key.
+            unsafe {
+                timer_callback(0 as PTP_CALLBACK_INSTANCE, raw_ctx, 1 as PTP_TIMER);
+            }
+
+            let waker = Waker::noop();
+            let mut cx = Context::from_waker(waker);
+            let mut listener = std::pin::pin!(listener);
+            let poll = listener.as_mut().poll(&mut cx);
+
+            match (expected, poll) {
+                (TimerOutcome::Signaled, Poll::Ready(Ok(()))) => {}
+                (TimerOutcome::Signaled, other) => {
+                    panic!("{label}: expected Ready(Ok(())), got {other:?}");
+                }
+                (TimerOutcome::Pending, Poll::Pending) => {}
+                (TimerOutcome::Pending, other) => {
+                    panic!("{label}: expected Pending (no signal), got {other:?}");
+                }
+            }
+
+            // Keep ctx alive past the listener observation.
+            drop(ctx);
+        }
+    }
 }
