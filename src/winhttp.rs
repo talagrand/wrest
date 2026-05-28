@@ -1290,6 +1290,8 @@ impl From<SignalCancelled> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::task::Poll;
+    use std::time::Duration;
 
     // -- Large-body multi-write path --
     //
@@ -1773,5 +1775,433 @@ mod tests {
             let result = resolve_version(flags, version_str);
             assert_eq!(result, expected, "resolve_version: {label}");
         }
+    }
+
+    /// `mark_final_callback_seen` must call `notify_all` even when no
+    /// callback was ever active -- the quiescent close path that fires
+    /// when `HANDLE_CLOSING` arrives with no other callbacks in flight.
+    #[test]
+    fn mark_final_callback_seen_quiescent_notifies() {
+        let state = RequestState::new(false);
+        state.mark_final_callback_seen();
+        assert!(state.lock_close_state().closed);
+    }
+
+    // ---------------------------------------------------------------------
+    // winhttp_callback dispatch (data-driven)
+    // ---------------------------------------------------------------------
+    //
+    // Drives `winhttp_callback` directly to cover every signaling status
+    // arm plus the `WRITE_COMPLETE` null/length guards.
+
+    enum LpvInfo {
+        Null,
+        AsyncResult(WINHTTP_ASYNC_RESULT),
+        U32(u32),
+    }
+
+    impl LpvInfo {
+        /// Raw pointer borrowing from `self`; caller must keep `self` alive.
+        fn as_ptr(&self) -> *mut std::ffi::c_void {
+            match self {
+                LpvInfo::Null => std::ptr::null_mut(),
+                LpvInfo::AsyncResult(r) => {
+                    (r as *const WINHTTP_ASYNC_RESULT) as *mut std::ffi::c_void
+                }
+                LpvInfo::U32(v) => (v as *const u32) as *mut std::ffi::c_void,
+            }
+        }
+    }
+
+    /// Expected `CompletionSignal` state after the callback runs.
+    enum DispatchOutcome {
+        Signaled(fn(&CallbackEvent) -> bool),
+        Pending,
+    }
+
+    /// Drive `winhttp_callback` and return (poll, closed, active, tls_flags).
+    fn drive_callback(
+        status: u32,
+        lpv_info: &LpvInfo,
+        info_len: u32,
+    ) -> (Poll<Result<CallbackEvent, SignalCancelled>>, bool, usize, u32) {
+        use std::task::{Context, Waker};
+
+        let state = Arc::new(RequestState::new(false));
+        let listener = state.signal.listen();
+        let ctx = CallbackContext::new(&state);
+
+        // SAFETY: `ctx` keeps the Arc alive across the call; non-HANDLE_CLOSING
+        // statuses use `borrow_raw` and never call `drop_raw`.
+        unsafe {
+            winhttp_callback(
+                std::ptr::null_mut(),
+                ctx.as_raw(),
+                status,
+                lpv_info.as_ptr(),
+                info_len,
+            );
+        }
+
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut listener = std::pin::pin!(listener);
+        let poll = listener.as_mut().poll(&mut cx);
+
+        let close = state.lock_close_state();
+        let closed = close.closed;
+        let active = close.active_callbacks;
+        drop(close);
+
+        let tls_flags = state.tls_failure_flags.load(Ordering::Acquire);
+        (poll, closed, active, tls_flags)
+    }
+
+    #[test]
+    fn winhttp_callback_dispatch_table() {
+        struct Case {
+            label: &'static str,
+            status: u32,
+            info_len: u32,
+            lpv_info: LpvInfo,
+            expected: DispatchOutcome,
+            expected_tls_flags: u32,
+        }
+
+        let async_result_size = std::mem::size_of::<WINHTTP_ASYNC_RESULT>() as u32;
+
+        let cases = [
+            Case {
+                label: "SENDREQUEST_COMPLETE -> Complete",
+                status: WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE,
+                info_len: 0,
+                lpv_info: LpvInfo::Null,
+                expected: DispatchOutcome::Signaled(|e| matches!(e, CallbackEvent::Complete)),
+                expected_tls_flags: 0,
+            },
+            Case {
+                label: "HEADERS_AVAILABLE -> Complete",
+                status: WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE,
+                info_len: 0,
+                lpv_info: LpvInfo::Null,
+                expected: DispatchOutcome::Signaled(|e| matches!(e, CallbackEvent::Complete)),
+                expected_tls_flags: 0,
+            },
+            Case {
+                label: "READ_COMPLETE(42) -> ReadComplete(42)",
+                status: WINHTTP_CALLBACK_STATUS_READ_COMPLETE,
+                info_len: 42,
+                lpv_info: LpvInfo::Null,
+                expected: DispatchOutcome::Signaled(|e| {
+                    matches!(e, CallbackEvent::ReadComplete(42))
+                }),
+                expected_tls_flags: 0,
+            },
+            Case {
+                label: "WRITE_COMPLETE with u32(256) and info_len=4 -> WriteComplete(256)",
+                status: WINHTTP_CALLBACK_STATUS_WRITE_COMPLETE,
+                info_len: 4,
+                lpv_info: LpvInfo::U32(256),
+                expected: DispatchOutcome::Signaled(|e| {
+                    matches!(e, CallbackEvent::WriteComplete(256))
+                }),
+                expected_tls_flags: 0,
+            },
+            // WRITE_COMPLETE has a null-guard that short-circuits the deref.
+            Case {
+                label: "WRITE_COMPLETE with NULL lpv_info -> WriteComplete(0) [null-guarded]",
+                status: WINHTTP_CALLBACK_STATUS_WRITE_COMPLETE,
+                info_len: 0,
+                lpv_info: LpvInfo::Null,
+                expected: DispatchOutcome::Signaled(|e| {
+                    matches!(e, CallbackEvent::WriteComplete(0))
+                }),
+                expected_tls_flags: 0,
+            },
+            // `dw_info_length >= 4` short-circuits even with a non-null pointer.
+            Case {
+                label: "WRITE_COMPLETE with info_len=2 -> WriteComplete(0) [length-guarded]",
+                status: WINHTTP_CALLBACK_STATUS_WRITE_COMPLETE,
+                info_len: 2,
+                lpv_info: LpvInfo::U32(99),
+                expected: DispatchOutcome::Signaled(|e| {
+                    matches!(e, CallbackEvent::WriteComplete(0))
+                }),
+                expected_tls_flags: 0,
+            },
+            // Cancellation arrives as REQUEST_ERROR(ERROR_WINHTTP_OPERATION_CANCELLED);
+            // the modeled arm must signal so the awaiter isn't left hanging.
+            Case {
+                label: "REQUEST_ERROR(TIMEOUT) -> Win32Error(TIMEOUT)",
+                status: WINHTTP_CALLBACK_STATUS_REQUEST_ERROR,
+                info_len: async_result_size,
+                lpv_info: LpvInfo::AsyncResult(WINHTTP_ASYNC_RESULT {
+                    dwResult: 0,
+                    dwError: ERROR_WINHTTP_TIMEOUT,
+                }),
+                expected: DispatchOutcome::Signaled(|e| {
+                    matches!(e, CallbackEvent::Win32Error(ERROR_WINHTTP_TIMEOUT))
+                }),
+                expected_tls_flags: 0,
+            },
+            Case {
+                label: "REQUEST_ERROR(OPERATION_CANCELLED) -> Win32Error(CANCELLED)",
+                status: WINHTTP_CALLBACK_STATUS_REQUEST_ERROR,
+                info_len: async_result_size,
+                lpv_info: LpvInfo::AsyncResult(WINHTTP_ASYNC_RESULT {
+                    dwResult: 0,
+                    dwError: ERROR_WINHTTP_OPERATION_CANCELLED,
+                }),
+                expected: DispatchOutcome::Signaled(|e| {
+                    matches!(e, CallbackEvent::Win32Error(ERROR_WINHTTP_OPERATION_CANCELLED))
+                }),
+                expected_tls_flags: 0,
+            },
+            Case {
+                label: "REQUEST_ERROR(SECURE_FAILURE) -> Win32Error(SECURE_FAILURE)",
+                status: WINHTTP_CALLBACK_STATUS_REQUEST_ERROR,
+                info_len: async_result_size,
+                lpv_info: LpvInfo::AsyncResult(WINHTTP_ASYNC_RESULT {
+                    dwResult: 0,
+                    dwError: ERROR_WINHTTP_SECURE_FAILURE,
+                }),
+                expected: DispatchOutcome::Signaled(|e| {
+                    matches!(e, CallbackEvent::Win32Error(ERROR_WINHTTP_SECURE_FAILURE))
+                }),
+                expected_tls_flags: 0,
+            },
+            // SECURE_FAILURE stores flags; the subsequent REQUEST_ERROR signals.
+            Case {
+                label: "SECURE_FAILURE(INVALID_CA) -> flags stored, no signal",
+                status: WINHTTP_CALLBACK_STATUS_SECURE_FAILURE,
+                info_len: 4,
+                lpv_info: LpvInfo::U32(WINHTTP_CALLBACK_STATUS_FLAG_INVALID_CA),
+                expected: DispatchOutcome::Pending,
+                expected_tls_flags: WINHTTP_CALLBACK_STATUS_FLAG_INVALID_CA,
+            },
+            Case {
+                label: "SECURE_FAILURE(CERT_CN_INVALID|CERT_DATE_INVALID) -> combined flags",
+                status: WINHTTP_CALLBACK_STATUS_SECURE_FAILURE,
+                info_len: 4,
+                lpv_info: LpvInfo::U32(
+                    WINHTTP_CALLBACK_STATUS_FLAG_CERT_CN_INVALID
+                        | WINHTTP_CALLBACK_STATUS_FLAG_CERT_DATE_INVALID,
+                ),
+                expected: DispatchOutcome::Pending,
+                expected_tls_flags: WINHTTP_CALLBACK_STATUS_FLAG_CERT_CN_INVALID
+                    | WINHTTP_CALLBACK_STATUS_FLAG_CERT_DATE_INVALID,
+            },
+            // Verbose-only statuses must not signal.
+            Case {
+                label: "CONNECTING_TO_SERVER (verbose-only) -> no signal",
+                status: WINHTTP_CALLBACK_STATUS_CONNECTING_TO_SERVER,
+                info_len: 0,
+                lpv_info: LpvInfo::Null,
+                expected: DispatchOutcome::Pending,
+                expected_tls_flags: 0,
+            },
+            Case {
+                label: "RESOLVING_NAME (verbose-only) -> no signal",
+                status: WINHTTP_CALLBACK_STATUS_RESOLVING_NAME,
+                info_len: 0,
+                lpv_info: LpvInfo::Null,
+                expected: DispatchOutcome::Pending,
+                expected_tls_flags: 0,
+            },
+            // Unmodeled statuses don't signal -- documents the current gap.
+            Case {
+                label: "Unknown status (0xDEADBEEF) -> no signal [documents the gap]",
+                status: 0xDEAD_BEEF,
+                info_len: 0,
+                lpv_info: LpvInfo::Null,
+                expected: DispatchOutcome::Pending,
+                expected_tls_flags: 0,
+            },
+        ];
+
+        for case in &cases {
+            let (poll, closed, active, tls_flags) =
+                drive_callback(case.status, &case.lpv_info, case.info_len);
+
+            match (&case.expected, poll) {
+                (DispatchOutcome::Signaled(matcher), Poll::Ready(Ok(event))) => {
+                    assert!(matcher(&event), "{}: wrong event signaled: {event:?}", case.label);
+                }
+                (DispatchOutcome::Signaled(_), other) => {
+                    panic!("{}: expected Ready(Ok(_)) signal, got {other:?}", case.label);
+                }
+                (DispatchOutcome::Pending, Poll::Pending) => {}
+                (DispatchOutcome::Pending, other) => {
+                    panic!("{}: expected Pending (no signal), got {other:?}", case.label);
+                }
+            }
+
+            assert_eq!(active, 0, "{}: active_callbacks must balance to 0", case.label);
+            assert!(!closed, "{}: closed must remain false (no HANDLE_CLOSING)", case.label);
+            assert_eq!(tls_flags, case.expected_tls_flags, "{}: tls_failure_flags", case.label);
+        }
+    }
+
+    /// `dw_context == 0` must early-return without dereferencing anything.
+    #[test]
+    fn winhttp_callback_null_context_is_noop() {
+        // Vary status to confirm the early-return runs before per-status logic.
+        let statuses = [
+            WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE,
+            WINHTTP_CALLBACK_STATUS_REQUEST_ERROR,
+            WINHTTP_CALLBACK_STATUS_SECURE_FAILURE,
+            WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING,
+            0xDEAD_BEEF,
+        ];
+
+        for &status in &statuses {
+            // SAFETY: dw_context=0 is the skip sentinel; callback returns immediately.
+            unsafe {
+                winhttp_callback(std::ptr::null_mut(), 0, status, std::ptr::null_mut(), 0);
+            }
+        }
+    }
+
+    /// HANDLE_CLOSING must mark closed, drop the retained Arc, and notify
+    /// any `wait_closed_and_idle` waiter.
+    #[test]
+    fn winhttp_callback_handle_closing_releases_retained_arc() {
+        let state = Arc::new(RequestState::new(false));
+        let ctx = CallbackContext::new(&state);
+
+        // Hand the retained ref to the simulated callback; strong=2 now.
+        let raw = ctx.into_raw();
+        assert_eq!(Arc::strong_count(&state), 2, "ref count after CallbackContext::into_raw");
+
+        // SAFETY: `raw` is live; HANDLE_CLOSING owns the sole `drop_raw` call.
+        unsafe {
+            winhttp_callback(
+                std::ptr::null_mut(),
+                raw,
+                WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING,
+                std::ptr::null_mut(),
+                0,
+            );
+        }
+
+        // Retained ref + HANDLE_CLOSING-arm clone have both been dropped.
+        assert_eq!(Arc::strong_count(&state), 1, "ref count after HANDLE_CLOSING");
+
+        let close = state.lock_close_state();
+        assert!(close.closed, "HANDLE_CLOSING must set closed=true");
+        assert_eq!(close.active_callbacks, 0, "active_callbacks must balance to 0");
+    }
+
+    // ---------------------------------------------------------------------
+    // wait_closed_and_idle: poison + transition tests
+    // ---------------------------------------------------------------------
+
+    /// Run `wait_closed_and_idle` on a worker; panic on timeout so a deadlock
+    /// surfaces as a failure instead of hanging the suite.
+    fn run_wait_with_timeout(state: &Arc<RequestState>, timeout: Duration, label: &str) {
+        use std::sync::mpsc;
+        use std::thread;
+
+        let (tx, rx) = mpsc::sync_channel::<()>(1);
+        let waiter = Arc::clone(state);
+        let _handle = thread::spawn(move || {
+            waiter.wait_closed_and_idle();
+            let _ = tx.send(());
+        });
+
+        match rx.recv_timeout(timeout) {
+            Ok(()) => {}
+            Err(_) => panic!("{label}: wait_closed_and_idle did not return within {timeout:?}"),
+        }
+    }
+
+    /// Poison `close_state` by panicking while holding the lock.
+    fn poison_close_state(state: &Arc<RequestState>) {
+        let s = Arc::clone(state);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = s.close_state.lock().expect("first lock should succeed");
+            panic!("simulated callback panic");
+        }));
+        assert!(state.close_state.is_poisoned(), "mutex should be poisoned");
+    }
+
+    /// Poison-recovery: must not deadlock when the underlying state is
+    /// already terminal.
+    #[test]
+    fn wait_closed_and_idle_poison_recovery_table() {
+        struct Case {
+            label: &'static str,
+            prepare: fn(&RequestState),
+            poison: bool,
+        }
+
+        let cases = [
+            Case {
+                label: "already closed and idle, healthy mutex",
+                prepare: |s| {
+                    let mut g = s.lock_close_state();
+                    g.closed = true;
+                    g.active_callbacks = 0;
+                },
+                poison: false,
+            },
+            Case {
+                label: "already closed and idle, poisoned mutex",
+                prepare: |s| {
+                    let mut g = s.lock_close_state();
+                    g.closed = true;
+                    g.active_callbacks = 0;
+                },
+                poison: true,
+            },
+            Case {
+                label: "mark_final_callback_seen + poisoned mutex",
+                prepare: |s| s.mark_final_callback_seen(),
+                poison: true,
+            },
+        ];
+
+        for case in &cases {
+            let state = Arc::new(RequestState::new(false));
+            (case.prepare)(&state);
+            if case.poison {
+                poison_close_state(&state);
+            }
+            run_wait_with_timeout(&state, Duration::from_secs(5), case.label);
+        }
+    }
+
+    /// Wakes when another thread transitions active -> closed+idle.
+    #[test]
+    fn wait_closed_and_idle_wakes_on_async_transition() {
+        use std::sync::mpsc;
+        use std::thread;
+
+        let state = Arc::new(RequestState::new(false));
+        // Simulate an in-flight callback (active=1) before any waiter starts.
+        {
+            let mut g = state.lock_close_state();
+            g.active_callbacks = 1;
+        }
+
+        let (tx, rx) = mpsc::sync_channel::<()>(1);
+        let waiter = Arc::clone(&state);
+        let _handle = thread::spawn(move || {
+            waiter.wait_closed_and_idle();
+            let _ = tx.send(());
+        });
+
+        // Give the waiter time to enter the condvar wait.
+        thread::sleep(Duration::from_millis(50));
+
+        // Simulate the callback finishing then HANDLE_CLOSING firing.
+        {
+            let mut g = state.lock_close_state();
+            g.active_callbacks = 0;
+        }
+        state.mark_final_callback_seen();
+
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("wait_closed_and_idle should return after closed=true && active=0");
     }
 }
