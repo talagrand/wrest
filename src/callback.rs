@@ -200,7 +200,10 @@ impl<T: Send> CompletionSignal<T> {
     pub fn signal(&self, value: T) {
         // Safe to recover from poison: `sender` is an `Option<Sender>` slot
         // with only `.take()` / `.replace()` -- no multi-field invariant.
-        if let Some(tx) = lock_or_clear(&self.sender).take() {
+        // Release the lock before `tx.send`: send wakes the receiver, and
+        // a custom inline-polling waker could re-enter `signal` and deadlock.
+        let taken = lock_or_clear(&self.sender).take();
+        if let Some(tx) = taken {
             let _ = tx.send(value); // Receiver may be dropped (cancelled) -- that's fine
         }
     }
