@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Callback hygiene: `CompletionSignal::signal` releases sender mutex before completing the channel; previously a theoretical custom inline-polling waker could have re-entered `signal` and deadlocked on the same mutex.
 - Callback safety: `winhttp_callback` and `timer_callback` FFI-exposed callbacks are now defensively protected against Rust panics flowing through to the calling OS thread.
 - Callback safety: WinHTTP callback now null/length-checks `lpv_info` before dereferencing avoiding hanging long awaiters when processing  `REQUEST_ERROR` and `SECURE_FAILURE`.
+- Status-code parsing: reject WinHTTP status codes that don't fit in `u16` instead of letting a bare `as u16` cast silently truncate (e.g. `0x100C8` masquerading as a successful `200 OK`).
 
 ### Changed
 - Release - Supply chain: SHA-pin all actions in the release workflow. Minimize default permissions with per-job-scoped writes.
