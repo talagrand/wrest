@@ -363,7 +363,7 @@ impl ClientBuilder {
     /// This covers the entire request lifecycle -- connection, sending,
     /// and receiving the response (including streaming body reads).
     /// Implemented via `futures_util::future::select` against a Win32
-    /// threadpool timer (see [`crate::timer::Delay`]).
+    /// threadpool timer.
     ///
     /// Default: **no timeout** (the request can run indefinitely).
     /// WinHTTP enforces a 60-second connect timeout by default;
