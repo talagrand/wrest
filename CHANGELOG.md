@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Callback safety: `winhttp_callback` and `timer_callback` FFI-exposed callbacks are now defensively protected against Rust panics flowing through to the calling OS thread.
 - Callback safety: WinHTTP callback now null/length-checks `lpv_info` before dereferencing avoiding hanging long awaiters when processing  `REQUEST_ERROR` and `SECURE_FAILURE`.
 - Status-code parsing: reject WinHTTP status codes that don't fit in `u16` instead of letting a bare `as u16` cast silently truncate (e.g. `0x100C8` masquerading as a successful `200 OK`).
+- Header dedup: `.json()` / `.form()` now override (rather than duplicate) a `Content-Type` from `Client::default_headers`.
 
 ### Changed
 - Release - Supply chain: SHA-pin all actions in the release workflow. Minimize default permissions with per-job-scoped writes.

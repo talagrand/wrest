@@ -462,8 +462,14 @@ impl RequestBuilder {
         let mut header_map = http::HeaderMap::new();
 
         // Collect the set of per-request header names for override detection.
-        let per_request_names: std::collections::HashSet<&str> =
-            self.headers.iter().map(|(name, _)| name.as_str()).collect();
+        // Lowercased to match `HeaderName::as_str()` (which is always lowercase)
+        // so a per-request push of e.g. `"Content-Type"` correctly overrides a
+        // default `content-type` instead of producing a duplicate header.
+        let per_request_names: std::collections::HashSet<String> = self
+            .headers
+            .iter()
+            .map(|(name, _)| name.to_ascii_lowercase())
+            .collect();
 
         // Add default headers that are NOT overridden by per-request headers.
         for (name, value) in &self.client.inner.default_headers {
@@ -937,28 +943,73 @@ mod tests {
     // -- Default header override semantics --
 
     #[test]
-    fn per_request_header_overrides_default() {
-        // Default headers set on the client should be overridden (not
-        // duplicated) when the request sets the same header name.
-        let mut defaults = http::HeaderMap::new();
-        defaults.insert("x-custom", "default-value".parse().unwrap());
-        let client = Client::builder().default_headers(defaults).build().unwrap();
+    fn per_request_header_overrides_default_table() {
+        // A per-request header must override a same-named default header
+        // (not duplicate it), regardless of
+        //   - whether the per-request name is set via `.header()`,
+        //     `.json()`, or `.form()`, and
+        //   - whether the per-request name's casing matches the lowercase
+        //     canonical form `HeaderMap` stores.
+        type Modify = fn(RequestBuilder) -> RequestBuilder;
+        struct Case {
+            label: &'static str,
+            default: (http::header::HeaderName, &'static str),
+            modify: Modify,
+            expected: (http::header::HeaderName, &'static [&'static str]),
+        }
 
-        let req = client
-            .get("https://example.com")
-            .header("x-custom", "override-value")
-            .build()
-            .unwrap();
+        let cases: &[Case] = &[
+            // `.header()` with already-lowercase name.
+            Case {
+                label: ".header() lowercase overrides default",
+                default: (http::header::HeaderName::from_static("x-custom"), "default"),
+                modify: |rb| rb.header("x-custom", "override"),
+                expected: (http::header::HeaderName::from_static("x-custom"), &["override"]),
+            },
+            // `.header()` with Pascal-case name: must still override since
+            // the dedup compares case-insensitively.
+            Case {
+                label: ".header() Pascal-case overrides default",
+                default: (http::header::HeaderName::from_static("x-custom"), "default"),
+                modify: |rb| rb.header("X-Custom", "override"),
+                expected: (http::header::HeaderName::from_static("x-custom"), &["override"]),
+            },
+            // `.json()` pushes `"Content-Type"` literally; must override.
+            #[cfg(feature = "json")]
+            Case {
+                label: ".json() overrides default Content-Type",
+                default: (http::header::CONTENT_TYPE, "text/plain"),
+                modify: |rb| rb.json(&serde_json::json!({"k": "v"})),
+                expected: (http::header::CONTENT_TYPE, &["application/json"]),
+            },
+            // `.form()` pushes `"Content-Type"` literally; must override.
+            #[cfg(feature = "form")]
+            Case {
+                label: ".form() overrides default Content-Type",
+                default: (http::header::CONTENT_TYPE, "text/plain"),
+                modify: |rb| rb.form(&[("k", "v")]),
+                expected: (http::header::CONTENT_TYPE, &["application/x-www-form-urlencoded"]),
+            },
+        ];
 
-        let values: Vec<_> = req
-            .headers()
-            .get_all("x-custom")
-            .iter()
-            .map(|v| v.to_str().unwrap().to_owned())
-            .collect();
+        for case in cases {
+            let mut defaults = http::HeaderMap::new();
+            defaults.insert(case.default.0.clone(), case.default.1.parse().unwrap());
+            let client = Client::builder().default_headers(defaults).build().unwrap();
 
-        // Must be exactly one value -- the override, not both.
-        assert_eq!(values, vec!["override-value"]);
+            let req = (case.modify)(client.post("https://example.com"))
+                .build()
+                .unwrap();
+
+            let values: Vec<_> = req
+                .headers()
+                .get_all(&case.expected.0)
+                .iter()
+                .map(|v| v.to_str().unwrap().to_owned())
+                .collect();
+
+            assert_eq!(values, case.expected.1, "{}", case.label);
+        }
     }
 
     #[test]
