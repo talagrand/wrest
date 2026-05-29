@@ -118,15 +118,21 @@ unsafe extern "system" fn timer_callback(
     if context.is_null() {
         return;
     }
-    #[cfg(debug_assertions)]
-    let _callback_stack_guard = debug::TimerCallbackStackGuard::enter(timer);
+    // A panic across this `extern "system"` boundary into the OS
+    // threadpool worker is UB; swallow it here.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        #[cfg(debug_assertions)]
+        let _callback_stack_guard = debug::TimerCallbackStackGuard::enter(timer);
+        #[cfg(not(debug_assertions))]
+        let _ = timer;
 
-    // SAFETY: `context` is the raw pointer from the live
-    // `CallbackContext<TimerState>` owned by `Delay`; it stays valid
-    // for the lifetime of the timer object, and `Delay::drop` waits
-    // for this callback to finish before releasing it.
-    let state: &TimerState = unsafe { CallbackContext::<TimerState>::borrow_raw(context as usize) };
-    state.signal.signal(());
+        // SAFETY: `context` is the live `CallbackContext<TimerState>`
+        // raw pointer owned by `Delay`; `Delay::drop` waits for this
+        // callback to finish before releasing it.
+        let state: &TimerState =
+            unsafe { CallbackContext::<TimerState>::borrow_raw(context as usize) };
+        state.signal.signal(());
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -289,9 +295,9 @@ impl Drop for Delay {
         // dereference the context Arc.
         drop(timer);
 
-        // The drain above guarantees no callback can dereference the
-        // pointer, so it is safe to drop the `CallbackContext`
-        // (which releases the strong ref).
+        // Safe to release the retained context ref: no callback can fire.
+        // Remaining field drop order (`_state`, `listener`, `fired`) is
+        // unconstrained for the same reason.
         let _ = self.callback_ctx.take();
     }
 }
