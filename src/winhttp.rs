@@ -1210,8 +1210,19 @@ fn query_status_code(h_request: *mut core::ffi::c_void, url: &Url) -> Result<Sta
         WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
     )
     .url_context(url)?;
+    parse_winhttp_status_code(status_code, url)
+}
 
-    StatusCode::from_u16(status_code as u16).map_err(|e| {
+/// Validate a raw WinHTTP status-code value and convert to `StatusCode`.
+///
+/// Rejects values outside `u16` before narrowing: a plain `as u16` cast
+/// would silently truncate (e.g. `0x100C8` would masquerade as 200).
+fn parse_winhttp_status_code(status_code: u32, url: &Url) -> Result<StatusCode, Error> {
+    let narrow = u16::try_from(status_code).map_err(|_| {
+        Error::request(format!("invalid status code: {status_code}")).with_url(url.clone())
+    })?;
+
+    StatusCode::from_u16(narrow).map_err(|e| {
         Error::request(ContextError::new(format!("invalid status code: {status_code}"), e))
             .with_url(url.clone())
     })
@@ -1696,6 +1707,69 @@ mod tests {
 
         assert!(err.is_timeout());
         assert_eq!(err.url().map(|u| u.as_str()), Some("https://example.com/test"));
+    }
+
+    /// Reject WinHTTP status codes that don't fit in `u16` before the cast,
+    /// so a corrupt value like `0x100C8` cannot truncate to 200 and
+    /// masquerade as success. Also exercises the `from_u16` rejection path.
+    #[test]
+    fn parse_winhttp_status_code_table() {
+        let url: Url = "https://example.com".parse().unwrap();
+
+        // `Ok(n)` requires `parse_winhttp_status_code(raw)` to yield
+        // `StatusCode(n)`. `Err` requires rejection with `raw` present
+        // somewhere in the error chain (so callers can diagnose).
+        let cases: &[(u32, Result<u16, ()>)] = &[
+            // -- accepts every valid HTTP status code -------------------
+            (100, Ok(100)),
+            (200, Ok(200)),
+            (404, Ok(404)),
+            (599, Ok(599)),
+            // -- rejects values that don't fit in u16 -------------------
+            // 0x100C8 narrowed via `as u16` is 200; must NOT silently
+            // masquerade as success.
+            (0x100C8, Err(())),
+            (u32::MAX, Err(())),
+            // -- fits in u16 but outside the HTTP three-digit range
+            // (caught by `StatusCode::from_u16`) ----
+            (0, Err(())),
+            (99, Err(())),
+            (1000, Err(())),
+            (u32::from(u16::MAX), Err(())),
+        ];
+
+        // The inner error message lives in `Error::source()`, not the
+        // top-level `Display`.
+        fn source_chain(err: &Error) -> String {
+            let mut s = String::new();
+            let mut cur: Option<&dyn std::error::Error> = std::error::Error::source(err);
+            while let Some(e) = cur {
+                s.push_str(&format!("{e}\n"));
+                cur = e.source();
+            }
+            s
+        }
+
+        for &(raw, ref expect) in cases {
+            match (parse_winhttp_status_code(raw, &url), expect) {
+                (Ok(got), Ok(want)) => {
+                    assert_eq!(got.as_u16(), *want, "raw {raw}: expected {want}");
+                }
+                (Err(err), Err(())) => {
+                    let chain = source_chain(&err);
+                    assert!(
+                        chain.contains(&raw.to_string()),
+                        "raw {raw}: error chain must mention the value, got: {chain}"
+                    );
+                }
+                (Ok(got), Err(())) => {
+                    panic!("raw {raw}: expected rejection, got Ok({})", got.as_u16())
+                }
+                (Err(err), Ok(want)) => {
+                    panic!("raw {raw}: expected Ok({want}), got Err({err})")
+                }
+            }
+        }
     }
 
     #[test]
