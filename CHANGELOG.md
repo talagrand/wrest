@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to Semantic Versioning.
 
-## Unreleased
+## 0.5.6
 
 ### Fixed
 - DLL-host safety: replaced `futures-timer` with a Win32-threadpool-backed `Delay` so the library no longer leaves a parked helper thread behind when a host process calls `FreeLibrary` on wrest. `futures-timer` remains as a dev-dependency for examples.
