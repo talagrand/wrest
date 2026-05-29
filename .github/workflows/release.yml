@@ -59,8 +59,7 @@ jobs:
     environment: crates-io
     permissions:
       contents: read
-      id-token: write     # Required for OIDC trusted publishing + Sigstore signing
-      attestations: write # Required for `actions/attest` (SLSA build provenance)
+      id-token: write   # Required for OIDC trusted publishing
 
     steps:
     - name: Checkout code
@@ -83,11 +82,10 @@ jobs:
       uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
       with:
         toolchain: stable
-        # Disable the action's default RUSTFLAGS=-D warnings for the
-        # publish dry-run, since new warning lints could have been introduced
-        # between the time CI ran and publish runs. CI is the gate for lint
-        # hygiene, so the release dry-run only needs to validate the *package*
-        # (Cargo.toml, files, build, deps), not relitigate lints.
+        # Disable the action's default RUSTFLAGS=-D warnings so a new warning
+        # lint introduced between CI and release-time doesn't fail the publish
+        # verify compile. CI is the gate for lint hygiene; the release only
+        # needs to validate the package (Cargo.toml, files, build, deps).
         rustflags: ''
 
     - name: Verify version matches tag
@@ -102,26 +100,15 @@ jobs:
         fi
         echo "Version check passed: $CARGO_VERSION"
 
-    - name: Verify crate package
-      # Also produces target/package/wrest-<version>.crate, which the
-      # attestation step below signs (`cargo package` not needed)
-      run: cargo publish --dry-run --locked --features __all-native-features
-
-    - name: Attest build provenance
-      # Attests that the `.crate` artifact was produced by this workflow at this commit.
-      # `actions/attest` defaults to SLSA build provenance mode
-      # Verifiable later with:
-      #   `gh attestation verify --repo talagrand/wrest <wrest-x.y.z.crate>`
-      uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
-      with:
-        subject-path: target/package/wrest-*.crate
-
     - name: Authenticate with crates.io
       uses: rust-lang/crates-io-auth-action@bbd81622f20ce9e2dd9622e3218b975523e45bbe # v1.0.4
       id: auth
 
     - name: Publish to crates.io
-      run: cargo publish --locked
+      # `cargo publish` internally packages + verifies + uploads. The
+      # __all-native-features flag ensures the verify compile covers the
+      # full native feature surface, not just defaults.
+      run: cargo publish --locked --features __all-native-features
       env:
         CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 

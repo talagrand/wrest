@@ -18,7 +18,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Changed
 - Release - Supply chain: SHA-pin all actions in the release workflow. Minimize default permissions with per-job-scoped writes.
 - Release - Actions: Switch to `actions-rust-lang/setup-rust-toolchain` to support SHA-pinning and remove `rust-cache` dependency, enable warnings by default and enable PR problem-matchers
-- Release - Provenance: Provide workflow attestation.
 - Dependabot - Group minor/patch updates for both cargo and github-actions into single PRs; review major version bumps independently.
 - CI - Add timeouts and cancel superseded PRs.
 - CI - Add macOS coverage.
