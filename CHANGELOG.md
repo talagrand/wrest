@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to Semantic Versioning.
 
+## Unreleased
+
+### Changed
+- CI - Reliability: swap `httpbin.org` for a locally-hosted version for reliability (doesn't affect local testing)
+
 ## 0.5.6
 
 ### Fixed

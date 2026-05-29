@@ -37,12 +37,29 @@ use wrest::Client;
 ))]
 use wrest::StatusCode;
 
-/// Helper: build a client with sensible defaults for real-world tests
+/// Build a client with sensible defaults for real-world tests
 fn test_client() -> Client {
     Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .expect("client build should succeed")
+}
+
+/// CI sets `HTTPBIN_URL` to a local go-httpbin instance to insulate against flakiness from
+/// a public site (though some tests still hit live endpoints that can't be covered by httpbin,
+/// like SSL and proxy tests, though experience shows they're far more reliable).
+/// Local testing is free to do the same of course, but normally hits httpbin.org proper -
+/// no new go or extra tooling dependency.
+#[cfg(any(
+    native_winhttp,
+    feature = "default-tls",
+    feature = "native-tls",
+    feature = "gzip",
+    feature = "deflate"
+))]
+fn httpbin(path: &str) -> String {
+    let base = std::env::var("HTTPBIN_URL").unwrap_or_else(|_| "https://httpbin.org".to_string());
+    format!("{base}{path}")
 }
 
 // -----------------------------------------------------------------------
@@ -68,17 +85,17 @@ async fn example_com() {
     assert!(text.contains("Example Domain"), "should contain expected text");
 }
 
-/// Test httpbin.org/get - service designed for HTTP testing
+/// Test httpbin /get - service designed for HTTP testing
 #[tokio::test]
 #[cfg(any(native_winhttp, feature = "default-tls", feature = "native-tls"))]
 async fn httpbin_get() {
     let client = test_client();
 
     let resp = client
-        .get("https://httpbin.org/get")
+        .get(httpbin("/get"))
         .send()
         .await
-        .expect("httpbin.org should be reachable");
+        .expect("httpbin should be reachable");
 
     assert_eq!(resp.status(), StatusCode::OK);
 
@@ -87,7 +104,7 @@ async fn httpbin_get() {
     assert!(text.contains("\"headers\""), "httpbin should return JSON");
 }
 
-/// Test httpbin.org/stream-bytes - real chunked encoding
+/// Test httpbin /stream-bytes - real chunked encoding
 #[tokio::test]
 #[cfg(any(native_winhttp, feature = "default-tls", feature = "native-tls"))]
 async fn httpbin_chunked_encoding() {
@@ -95,7 +112,7 @@ async fn httpbin_chunked_encoding() {
 
     // Request 10KB in chunks
     let resp = client
-        .get("https://httpbin.org/stream-bytes/10240")
+        .get(httpbin("/stream-bytes/10240"))
         .send()
         .await
         .expect("chunked request should succeed");
@@ -106,15 +123,15 @@ async fn httpbin_chunked_encoding() {
     assert_eq!(bytes.len(), 10240, "should receive exactly 10KB");
 }
 
-/// Test httpbin.org/redirect - real HTTP redirects
+/// Test httpbin /redirect - real HTTP redirects
 #[tokio::test]
 #[cfg(any(native_winhttp, feature = "default-tls", feature = "native-tls"))]
 async fn httpbin_redirect_chain() {
     let client = test_client();
 
-    // httpbin.org/redirect/3 does 3 redirects then returns 200
+    // httpbin /redirect/3 does 3 redirects then returns 200
     let resp = client
-        .get("https://httpbin.org/redirect/3")
+        .get(httpbin("/redirect/3"))
         .send()
         .await
         .expect("redirect chain should succeed");
@@ -128,7 +145,7 @@ async fn httpbin_redirect_chain() {
     );
 }
 
-/// Test httpbin.org/gzip - real gzip compression
+/// Test httpbin /gzip - real gzip compression
 // WinHTTP always sends `Accept-Encoding: gzip, deflate` and auto-decompresses;
 // reqwest only does this when its `gzip` feature is enabled.
 #[tokio::test]
@@ -137,7 +154,7 @@ async fn httpbin_gzip_decompression() {
     let client = test_client();
 
     let resp = client
-        .get("https://httpbin.org/gzip")
+        .get(httpbin("/gzip"))
         .send()
         .await
         .expect("gzip request should succeed");
@@ -149,16 +166,16 @@ async fn httpbin_gzip_decompression() {
     assert!(text.contains("\"gzipped\": true"), "should confirm gzip was used and decompressed");
 }
 
-/// Test httpbin.org/deflate - real deflate compression
+/// Test httpbin /deflate - real deflate compression
 // WinHTTP auto-decompresses deflate; reqwest requires its `deflate` feature.
 #[tokio::test]
 #[cfg(any(native_winhttp, feature = "deflate"))]
 async fn httpbin_deflate_decompression() {
     let client = test_client();
 
-    let result = client.get("https://httpbin.org/deflate").send().await;
+    let result = client.get(httpbin("/deflate")).send().await;
 
-    // httpbin.org/deflate endpoint sometimes has issues, so we allow failure
+    // httpbin /deflate endpoint sometimes has issues, so we allow failure
     // The gzip test above validates compression handling
     match result {
         Ok(resp) => {
@@ -172,13 +189,13 @@ async fn httpbin_deflate_decompression() {
                     );
                 }
                 Err(e) => {
-                    println!("httpbin.org/deflate body read failed (known flaky): {e}");
+                    println!("httpbin /deflate body read failed (known flaky): {e}");
                 }
             }
         }
         Err(e) => {
-            // httpbin.org/deflate is known to be flaky, don't fail the test
-            println!("httpbin.org/deflate request failed (known flaky endpoint): {e}");
+            // httpbin /deflate is known to be flaky, don't fail the test
+            println!("httpbin /deflate request failed (known flaky endpoint): {e}");
         }
     }
 }

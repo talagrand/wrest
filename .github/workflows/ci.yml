@@ -15,6 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
   MSRV: '1.90'
 
 jobs:
@@ -49,6 +50,7 @@ jobs:
       id: resolve
       shell: bash
       run: |
+        set -euo pipefail
         # Toolchain
         rust="${{ matrix.rust }}"
         [[ "$rust" == "msrv" ]] && rust="$MSRV"
@@ -62,25 +64,47 @@ jobs:
           all-reqwest)  echo "flags=--features __all-native-features,always-reqwest" ;;
         esac >> "$GITHUB_OUTPUT"
 
+        if [[ "${{ matrix.rust }}" == "stable" ]]; then
+          echo "should-run-full-checks=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "should-run-full-checks=false" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Install Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
         toolchain: ${{ steps.resolve.outputs.toolchain }}
-        components: ${{ matrix.rust == 'stable' && 'clippy' || '' }}
+        components: ${{ steps.resolve.outputs.should-run-full-checks == 'true' && 'clippy' || '' }}
+
+    - name: Start go-httpbin
+      # Local tests just hit httpbin.org for simplicity, but that introduces a source
+      # of flakiness. For CI, we run a local instance of the service for reliability.
+      # Note some tests continue to hit live end-points that cannot be covered by httpbin
+      # (namely SSL and proxy tests), but experimentally these are far more reliable.
+      if: steps.resolve.outputs.should-run-full-checks == 'true'
+      uses: ./.github/actions/start-httpbin
 
     - name: Run clippy
-      if: matrix.rust == 'stable'
+      if: steps.resolve.outputs.should-run-full-checks == 'true'
       run: cargo clippy --all-targets ${{ steps.resolve.outputs.flags }} -- -D warnings
 
     - name: Run tests
-      if: matrix.rust == 'stable'
+      if: steps.resolve.outputs.should-run-full-checks == 'true'
       run: cargo test --all-targets ${{ steps.resolve.outputs.flags }} --verbose
+
+    - name: Diagnose failure
+      if: failure() && steps.resolve.outputs.should-run-full-checks == 'true'
+      shell: bash
+      run: |
+        echo "::group::go-httpbin log"
+        cat httpbin.log || echo "(no httpbin.log found)"
+        echo "::endgroup::"
 
     - name: Check library (MSRV)
       # MSRV verifies the library still compiles on the stated minimum
       # toolchain.  We use `cargo check` (not `cargo test`) so MSRV is
       # bound by the public API, not by dev-dependencies.
-      if: matrix.rust == 'msrv'
+      if: steps.resolve.outputs.should-run-full-checks != 'true'
       run: cargo check ${{ steps.resolve.outputs.flags }} --verbose
 
     - name: Run doc tests
@@ -143,8 +167,19 @@ jobs:
       with:
         tool: cargo-llvm-cov
 
+    - name: Start go-httpbin
+      uses: ./.github/actions/start-httpbin
+
     - name: Generate coverage
       run: cargo llvm-cov --features __all-native-features --lcov --output-path lcov.info
+
+    - name: Diagnose failure
+      if: failure()
+      shell: bash
+      run: |
+        echo "::group::go-httpbin log"
+        cat httpbin.log || echo "(no httpbin.log found)"
+        echo "::endgroup::"
 
     - name: Upload to Codecov
       uses: codecov/codecov-action@v6
