@@ -9,7 +9,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Fixed
 - DLL-host safety: replaced `futures-timer` with a Win32-threadpool-backed `Delay` so the library no longer leaves a parked helper thread behind when a host process calls `FreeLibrary` on wrest. `futures-timer` remains as a dev-dependency for examples.
 - DLL-host safety: WinHTTP request handles now drain in-flight callbacks during `Drop`, so an OS callback can no longer fire into unmapped code after a host drops the response and unloads the library. `WinHttpRequestHandle::drop` blocks until both `WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING` has been delivered and no other callback is active for the handle.
-- Callback hygiene: `CompletionSignal::signal` now releases the sender mutex before completing the channel. The previous pattern held the guard across `oneshot::Sender::send`, which invokes the receiver's waker; a custom inline-polling waker could have re-entered `signal` and deadlocked on the same mutex.
+- Callback hygiene: `CompletionSignal::signal` releases sender mutex before completing the channel; previously a theoretical custom inline-polling waker could have re-entered `signal` and deadlocked on the same mutex.
+- Callback safety: `winhttp_callback` and `timer_callback` FFI-exposed callbacks are now defensively protected against Rust panics flowing through to the calling OS thread.
+- Callback safety: WinHTTP callback now null/length-checks `lpv_info` before dereferencing avoiding hanging long awaiters when processing  `REQUEST_ERROR` and `SECURE_FAILURE`.
 
 ### Changed
 - Release - Supply chain: SHA-pin all actions in the release workflow. Minimize default permissions with per-job-scoped writes.

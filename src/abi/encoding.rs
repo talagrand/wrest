@@ -95,10 +95,8 @@ const U_ZERO_ERROR: i32 = 0;
 // Function-pointer types (matching ICU4C's public C ABI)
 // ---------------------------------------------------------------------------
 //
-// On x86_64 Windows the `extern "C"` and `extern "system"` calling
-// conventions are identical (both use the Microsoft x64 ABI), so
-// transmuting `FARPROC` (`extern "system"`) to these `extern "C"`
-// pointers is sound.
+// `GetProcAddress` returns a placeholder fn-pointer type; callers retype it
+// to the real signature. ICU exports are `U_CAPI`, hence `extern "C"`.
 
 /// `UConverter *ucnv_open(const char *converterName, UErrorCode *err);`
 type UcnvOpenFn = unsafe extern "C" fn(name: *const u8, err: *mut i32) -> *mut core::ffi::c_void;
@@ -165,9 +163,8 @@ fn load_icu() -> Option<IcuFunctions> {
     let to_u_chars = get_proc(h, b"ucnv_toUChars\0")?;
     let close = get_proc(h, b"ucnv_close\0")?;
 
-    // SAFETY: on x86_64 Windows `extern "C"` == `extern "system"` (both
-    // use the Microsoft x64 calling convention).  The transmuted
-    // signatures match ICU4C's stable public C API.
+    // SAFETY: fn-ptr-to-fn-ptr transmute (always layout-compatible); destination
+    // signatures match ICU's `extern "C"` exports.
     Some(IcuFunctions {
         ucnv_open: unsafe {
             std::mem::transmute::<unsafe extern "system" fn() -> isize, UcnvOpenFn>(open)

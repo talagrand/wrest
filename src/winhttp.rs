@@ -385,7 +385,27 @@ pub(crate) unsafe extern "system" fn winhttp_callback(
     if dw_context == 0 {
         return;
     }
+    // A panic across this `extern "system"` boundary into a WinHTTP
+    // worker thread is UB; swallow it here.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: caller (WinHTTP) upholds the contract documented on
+        // `winhttp_callback`.
+        unsafe { winhttp_callback_body(dw_context, dw_status, lpv_info, dw_info_length) };
+    }));
+}
 
+/// Body of [`winhttp_callback`], split out so the FFI entry point stays a
+/// thin `catch_unwind` wrapper.
+///
+/// # Safety
+///
+/// Same contract as [`winhttp_callback`].
+unsafe fn winhttp_callback_body(
+    dw_context: usize,
+    dw_status: u32,
+    lpv_info: *mut std::ffi::c_void,
+    dw_info_length: u32,
+) {
     #[cfg(debug_assertions)]
     let _callback_stack_guard = WinHttpCallbackStackGuard::enter(dw_context);
 
@@ -430,14 +450,30 @@ pub(crate) unsafe extern "system" fn winhttp_callback(
         }
 
         WINHTTP_CALLBACK_STATUS_REQUEST_ERROR => {
-            let result = unsafe { &*(lpv_info as *const WINHTTP_ASYNC_RESULT) };
-            state
-                .signal
-                .signal(CallbackEvent::Win32Error(result.dwError));
+            // Guard against a buggy/short `lpv_info` delivery (deref of a
+            // null or undersized pointer is UB). Fallback signals an
+            // internal error so the awaiter doesn't hang.
+            let code = if !lpv_info.is_null()
+                && dw_info_length as usize >= std::mem::size_of::<WINHTTP_ASYNC_RESULT>()
+            {
+                // SAFETY: null-checked above; payload is at least one struct
+                // worth of bytes per the length check.
+                unsafe { (*(lpv_info as *const WINHTTP_ASYNC_RESULT)).dwError }
+            } else {
+                ERROR_WINHTTP_INTERNAL_ERROR
+            };
+            state.signal.signal(CallbackEvent::Win32Error(code));
         }
 
         WINHTTP_CALLBACK_STATUS_SECURE_FAILURE => {
-            let flags = unsafe { *(lpv_info as *const u32) };
+            // Same null/short-buffer guard as REQUEST_ERROR.
+            let flags =
+                if !lpv_info.is_null() && dw_info_length as usize >= std::mem::size_of::<u32>() {
+                    // SAFETY: null-checked above; size verified.
+                    unsafe { *(lpv_info as *const u32) }
+                } else {
+                    0
+                };
             // Release: pairs with the Acquire load in callback_error_to_error
             // so the executor thread observes the stored flags.  (On x86 this
             // compiles identically to Relaxed -- the stronger ordering is for
@@ -735,16 +771,16 @@ pub(crate) async fn execute_request(
     // Drop the raw request handle pointer so it does not live across await points
     let _ = h_request;
 
-    // Park a context strong ref for the WinHTTP callback.  If
-    // `winhttp_set_option_usize` fails, `ctx`'s `Drop` releases the
-    // retained ref; on success, the WinHTTP `HANDLE_CLOSING` callback
-    // owns it, so we suppress the local `Drop` with `into_raw`.
+    // Park a context strong ref for the WinHTTP callback. On `SetOption`
+    // failure the plain `WinHttpHandle::drop` closes without draining --
+    // safe, since the null-`dw_context` guard short-circuits HANDLE_CLOSING.
     let ctx = CallbackContext::<RequestState>::new(&state);
     abi::winhttp_set_option_usize(request_handle.0, WINHTTP_OPTION_CONTEXT_VALUE, ctx.as_raw())
         .map_err(|e| e.with_url(url.clone()))?;
-    // Ownership transferred to WinHTTP; `HANDLE_CLOSING` will release.
     let _ = ctx.into_raw();
 
+    // Context installed: upgrade to the draining wrapper so any later
+    // setup failure (proxy, cert, ...) drops through `wait_closed_and_idle`.
     let request_handle = request_handle.into_request_handle(Arc::clone(&state));
 
     // Apply per-request proxy override.
@@ -1792,7 +1828,9 @@ mod tests {
     // ---------------------------------------------------------------------
     //
     // Drives `winhttp_callback` directly to cover every signaling status
-    // arm plus the `WRITE_COMPLETE` null/length guards.
+    // arm plus the `WRITE_COMPLETE` null/length guards. The `REQUEST_ERROR`
+    // and `SECURE_FAILURE` arms (which also null/length-guard `lpv_info`)
+    // are exercised in `winhttp_callback_null_lpv_info_guarded` below.
 
     enum LpvInfo {
         Null,
@@ -2090,6 +2128,38 @@ mod tests {
         let close = state.lock_close_state();
         assert!(close.closed, "HANDLE_CLOSING must set closed=true");
         assert_eq!(close.active_callbacks, 0, "active_callbacks must balance to 0");
+    }
+
+    /// Both `REQUEST_ERROR` and `SECURE_FAILURE` arms must null/length-guard
+    /// the `lpv_info` deref: `REQUEST_ERROR` falls back to
+    /// `ERROR_WINHTTP_INTERNAL_ERROR`, `SECURE_FAILURE` to `tls_flags == 0`.
+    #[test]
+    fn winhttp_callback_null_lpv_info_guarded() {
+        // REQUEST_ERROR with NULL lpv_info -> internal-error signal, no UB.
+        let (poll, _closed, active, _flags) =
+            drive_callback(WINHTTP_CALLBACK_STATUS_REQUEST_ERROR, &LpvInfo::Null, 0);
+        assert_eq!(active, 0, "REQUEST_ERROR NULL: active_callbacks must balance to 0");
+        match poll {
+            Poll::Ready(Ok(CallbackEvent::Win32Error(code))) => {
+                assert_eq!(
+                    code, ERROR_WINHTTP_INTERNAL_ERROR,
+                    "REQUEST_ERROR NULL: must signal INTERNAL_ERROR fallback"
+                );
+            }
+            other => {
+                panic!("REQUEST_ERROR NULL: expected Win32Error(INTERNAL_ERROR), got {other:?}")
+            }
+        }
+
+        // SECURE_FAILURE with NULL lpv_info -> no signal, flags stay 0, no UB.
+        let (poll, _closed, active, flags) =
+            drive_callback(WINHTTP_CALLBACK_STATUS_SECURE_FAILURE, &LpvInfo::Null, 0);
+        assert_eq!(active, 0, "SECURE_FAILURE NULL: active_callbacks must balance to 0");
+        assert_eq!(flags, 0, "SECURE_FAILURE NULL: tls_failure_flags must stay 0");
+        assert!(
+            matches!(poll, Poll::Pending),
+            "SECURE_FAILURE NULL: must not signal (REQUEST_ERROR follow-up carries the error)"
+        );
     }
 
     // ---------------------------------------------------------------------
