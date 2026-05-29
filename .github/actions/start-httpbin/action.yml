@@ -1,0 +1,36 @@
+name: 'Start go-httpbin'
+description: >
+  Installs Go from .github/ci-tools/go.mod, builds and starts go-httpbin on
+  127.0.0.1:8080, waits for readiness, and exports HTTPBIN_URL to GITHUB_ENV.
+  Logs go-httpbin output to ./httpbin.log so downstream "Diagnose failure"
+  step can dump it.
+  Note: server process is left running after the job; GH runners are
+  automatically reaped.
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: '.github/ci-tools/go.mod'
+
+    - name: Start go-httpbin
+      shell: bash
+      run: |
+        set -euo pipefail
+        export GOBIN="$PWD/target/ci-tools"
+        mkdir -p "$GOBIN"
+        go install -C .github/ci-tools tool
+        "$GOBIN/go-httpbin" -host 127.0.0.1 -port 8080 > httpbin.log 2>&1 &
+        ok=0
+        for _ in $(seq 1 20); do
+          curl -fsS http://127.0.0.1:8080/get > /dev/null 2>&1 && { ok=1; break; }
+          sleep 0.5
+        done
+        if [[ $ok -ne 1 ]]; then
+          echo "::error::go-httpbin failed to start within 10s"
+          cat httpbin.log || true
+          exit 1
+        fi
+        echo "HTTPBIN_URL=http://127.0.0.1:8080" >> "$GITHUB_ENV"

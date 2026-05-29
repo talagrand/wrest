@@ -36,3 +36,16 @@ updates:
         update-types:
           - "minor"
           - "patch"
+
+  # Track versions of CLI tools that CI installs from source.
+  - package-ecosystem: "gomod"
+    directory: "/.github/ci-tools"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 2
+    labels:
+      - "github-actions"
+      - "dependencies"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
