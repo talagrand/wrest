@@ -238,7 +238,14 @@ impl RequestState {
 
     fn enter_callback(&self) -> RequestCallbackGuard<'_> {
         let mut close_state = self.lock_close_state();
-        close_state.active_callbacks += 1;
+        // Mirror `checked_sub` in the drop path: overflow here would
+        // mean an unbalanced increment, which is a real bug -- panic
+        // rather than silently wrap or saturate (saturating would
+        // deadlock `wait_closed_and_idle` forever).
+        close_state.active_callbacks = close_state
+            .active_callbacks
+            .checked_add(1)
+            .expect("active_callbacks overflow");
         RequestCallbackGuard { request: self }
     }
 
@@ -280,21 +287,15 @@ struct RequestCallbackGuard<'a> {
     request: &'a RequestState,
 }
 
-impl RequestCallbackGuard<'_> {
-    fn mark_final_callback_seen(&self) {
-        self.request.mark_final_callback_seen();
-    }
-}
-
 impl Drop for RequestCallbackGuard<'_> {
     fn drop(&mut self) {
         let mut close_state = self.request.lock_close_state();
-        if close_state.active_callbacks == 0 {
+        let Some(remaining) = close_state.active_callbacks.checked_sub(1) else {
             warn!("WinHTTP callback activity underflow; ignoring duplicate exit");
             return;
-        }
-        close_state.active_callbacks -= 1;
-        if close_state.closed && close_state.active_callbacks == 0 {
+        };
+        close_state.active_callbacks = remaining;
+        if close_state.closed && remaining == 0 {
             self.request.close_idle.notify_all();
         }
     }
@@ -410,15 +411,14 @@ unsafe fn winhttp_callback_body(
     let _callback_stack_guard = WinHttpCallbackStackGuard::enter(dw_context);
 
     if dw_status == WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING {
-        // Take a strong ref so `mark_final_callback_seen` can run after
-        // the retained context is released.
         let state: Arc<RequestState> =
             unsafe { CallbackContext::<RequestState>::clone_arc_from_raw(dw_context) };
-        let callback_guard = state.enter_callback();
-        callback_guard.mark_final_callback_seen();
-        // SAFETY: This is the final callback for this retained context.
+        // Release the retained context first and skip `enter_callback`:
+        // a panic in the counter increment would be swallowed by
+        // `catch_unwind` and leave `wait_closed_and_idle` hanging.
+        // SAFETY: HANDLE_CLOSING is the final callback for this context.
         unsafe { CallbackContext::<RequestState>::drop_raw(dw_context) };
-        drop(callback_guard);
+        state.mark_final_callback_seen();
         return;
     }
 
@@ -558,9 +558,9 @@ fn log_verbose_status(status: u32, info: *mut std::ffi::c_void, info_len: u32) {
 /// Configuration for creating a WinHTTP session.
 pub(crate) struct SessionConfig {
     pub user_agent: String,
-    pub connect_timeout_ms: u32,
-    pub send_timeout_ms: u32,
-    pub read_timeout_ms: u32,
+    pub connect_timeout_ms: i32,
+    pub send_timeout_ms: i32,
+    pub read_timeout_ms: i32,
     pub verbose: bool,
     pub max_connections_per_host: Option<u32>,
     pub proxy: ProxyAction,
@@ -608,9 +608,9 @@ impl WinHttpSession {
         abi::winhttp_set_timeouts(
             session.0,
             0, // resolve: OS default
-            config.connect_timeout_ms as i32,
-            config.send_timeout_ms as i32,
-            config.read_timeout_ms as i32,
+            config.connect_timeout_ms,
+            config.send_timeout_ms,
+            config.read_timeout_ms,
         )?;
 
         // Enable HTTP/2 (unless http1_only is set).
@@ -909,10 +909,7 @@ pub(crate) async fn execute_request(
             // Build the RFC 7230 chunked-encoded frame:
             //   {hex_size}\r\n{data}\r\n
             let header = format!("{:x}\r\n", chunk.len());
-            let mut frame = Vec::with_capacity(header.len() + chunk.len() + 2);
-            frame.extend_from_slice(header.as_bytes());
-            frame.extend_from_slice(&chunk);
-            frame.extend_from_slice(b"\r\n");
+            let frame: Vec<u8> = [header.as_bytes(), &chunk, b"\r\n"].concat();
 
             // Store the encoded frame in state.send_body for
             // cancellation safety -- WinHTTP may still reference the
@@ -920,7 +917,7 @@ pub(crate) async fn execute_request(
             let (frame_ptr, frame_len) = {
                 let mut guard = lock_or_clear(&state.send_body);
                 let stored = guard.insert(frame.into());
-                (stored.as_ptr() as usize, stored.len() as u32)
+                (stored.as_ptr() as usize, stored.len())
             };
 
             write_data(&state.signal, &request_handle, frame_ptr, frame_len, url).await?;
@@ -932,7 +929,7 @@ pub(crate) async fn execute_request(
             let (term_ptr, term_len) = {
                 let mut guard = lock_or_clear(&state.send_body);
                 let stored = guard.insert(terminator.into());
-                (stored.as_ptr() as usize, stored.len() as u32)
+                (stored.as_ptr() as usize, stored.len())
             };
 
             write_data(&state.signal, &request_handle, term_ptr, term_len, url).await?;
@@ -941,6 +938,10 @@ pub(crate) async fn execute_request(
         // Fast path: body fits in a single DWORD.  WinHTTP adds
         // Content-Length automatically and sends everything in one call.
         trace!(body_len, "body path: inline");
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "`body_len <= LARGE_BODY_THRESHOLD` (== u32::MAX in production) is checked above"
+        )]
         let inline_len = body_len as u32;
         let h_send = request_handle.as_send();
 
@@ -1002,18 +1003,22 @@ pub(crate) async fn execute_request(
         // `body_ptr` is a usize pointer into state.send_body (safe across
         // cancellation -- the Arc keeps it alive until HANDLE_CLOSING).
         if has_bytes_body {
-            let total_len = body_len as usize;
+            let total_len = usize::try_from(body_len)
+                .map_err(|_| Error::body("body too large for this platform's address space"))?;
             let chunk_max = LARGE_BODY_CHUNK_MAX;
             let mut offset: usize = 0;
 
+            #[expect(
+                clippy::arithmetic_side_effects,
+                reason = "offset < total_len each iteration; offset += chunk_size <= total_len; body_ptr+body_offset is within the allocated Vec"
+            )]
             while offset < total_len {
                 let remaining = total_len - offset;
                 let chunk_size = remaining.min(chunk_max);
-                let chunk_len = chunk_size as u32;
 
                 // `body_ptr` is the base pointer (usize) into state.send_body.
                 let body_offset = offset;
-                write_data(&state.signal, &request_handle, body_ptr + body_offset, chunk_len, url)
+                write_data(&state.signal, &request_handle, body_ptr + body_offset, chunk_size, url)
                     .await?;
 
                 offset += chunk_size;
@@ -1077,17 +1082,21 @@ pub(crate) async fn execute_request(
 ///
 /// `data_ptr` is a `usize` pointer into a buffer that outlives the async
 /// operation (typically stored in `state.send_body` for cancellation safety).
+/// `data_len` is `usize`; values exceeding `u32::MAX` produce `Error::body`
+/// (WinHTTP's `dwNumberOfBytesToWrite` is a `DWORD`).
 async fn write_data(
     signal: &CompletionSignal<CallbackEvent>,
     handle: &WinHttpRequestHandle,
     data_ptr: usize,
-    data_len: u32,
+    data_len: usize,
     url: &Url,
 ) -> Result<u32, Error> {
+    let data_len_u32 =
+        u32::try_from(data_len).map_err(|_| Error::body("WinHTTP write buffer exceeds 4 GiB"))?;
     let h = handle.as_send();
     await_win32(signal, move || {
         let ptr = data_ptr as *const std::ffi::c_void;
-        abi::winhttp_write_data(h.as_mut_ptr(), ptr, data_len).url_context(url)
+        abi::winhttp_write_data(h.as_mut_ptr(), ptr, data_len_u32).url_context(url)
     })
     .await?
     .into_write_complete(url)
@@ -1126,7 +1135,7 @@ pub(crate) async fn read_chunk(
             let mut guard = lock_or_clear(&state.read_buffer);
             let buf_ref = guard.insert(buf);
             let spare = buf_ref.spare_capacity_mut();
-            (spare.as_ptr() as *mut std::ffi::c_void, spare.len() as u32)
+            (spare.as_ptr() as *mut std::ffi::c_void, spare.len())
         };
         abi::winhttp_read_data(h_read.as_mut_ptr(), buf_ptr, buf_capacity).url_context(url)
     })
@@ -1980,7 +1989,7 @@ mod tests {
             expected_tls_flags: u32,
         }
 
-        let async_result_size = std::mem::size_of::<WINHTTP_ASYNC_RESULT>() as u32;
+        let async_result_size = crate::abi::dword_size_of::<WINHTTP_ASYNC_RESULT>();
 
         let cases = [
             Case {

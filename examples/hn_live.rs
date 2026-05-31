@@ -140,11 +140,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let score = item.score.unwrap_or(0);
                 let comments = item.descendants.unwrap_or(0);
                 let url = item.url.as_deref().unwrap_or("(self post)");
-                println!("  {:>2}. {title}", i + 1);
+                println!("  {:>2}. {title}", i.saturating_add(1));
                 println!("      {score} pts by {by} | {comments} comments");
                 println!("      {url}");
             }
-            Err(e) => println!("  {:>2}. Error: {e}", i + 1),
+            Err(e) => println!("  {:>2}. Error: {e}", i.saturating_add(1)),
         }
     }
 
@@ -168,12 +168,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         RUN_DURATION.as_secs()
     );
 
-    let deadline = Instant::now() + RUN_DURATION;
+    let start_time = Instant::now();
     let mut new_comments = 0u32;
     let mut new_stories = 0u32;
 
     loop {
-        if Instant::now() >= deadline {
+        if start_time.elapsed() >= RUN_DURATION {
             break;
         }
 
@@ -194,6 +194,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Clamp to MAX_BATCH so we don't fire hundreds of requests.
+        #[expect(
+            clippy::arithmetic_side_effects,
+            reason = "new_max > cursor (above); new_max > MAX_BATCH (if-branch); cursor+1 safe for HN ids"
+        )]
         let start = if new_max - cursor > MAX_BATCH {
             new_max - MAX_BATCH
         } else {
@@ -229,7 +233,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let preview = truncate(&text, 120);
                     let parent = item.parent.unwrap_or(0);
 
-                    new_comments += 1;
+                    new_comments = new_comments.saturating_add(1);
                     println!("  💬 {by} (on item {parent}):");
                     println!("     {preview}\n");
                 }
@@ -241,7 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let by = item.by.as_deref().unwrap_or("?");
                     let url = item.url.as_deref().unwrap_or("(self post)");
 
-                    new_stories += 1;
+                    new_stories = new_stories.saturating_add(1);
                     println!("  📰 NEW: {title}");
                     println!("     by {by} | {url}\n");
                 }

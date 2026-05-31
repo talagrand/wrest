@@ -13,6 +13,8 @@
 //! 2. `WaitForThreadpoolTimerCallbacks(_, TRUE)` -- cancel + wait
 //! 3. `CloseThreadpoolTimer(_)` -- release the object
 
+use std::time::Duration;
+
 use windows_sys::Win32::{
     Foundation::FILETIME,
     System::Threading::{
@@ -62,19 +64,26 @@ impl ThreadpoolTimer {
         }
     }
 
-    /// `SetThreadpoolTimer` -- arm (`Some`) or stop (`None`) the timer.
+    /// `SetThreadpoolTimer` -- arm (`Some(due)`) or stop (`None`) the timer.
     ///
-    /// `due_in_ticks` is a non-negative duration in 100-ns units; the
-    /// wrapper negates it because `SetThreadpoolTimer` reads a negative
-    /// `FILETIME` as a relative due time.
-    pub(crate) fn set_relative(&self, due_in_ticks: Option<i64>) {
-        match due_in_ticks {
-            Some(ticks) => {
-                // Negative => relative time, in 100-ns units.
+    /// `due` is interpreted as a delay from now, with 100-ns resolution.
+    /// `Some(Duration::ZERO)` fires the callback immediately.
+    /// Durations beyond `i64::MAX` ticks (~29,247 years) saturate.
+    pub(crate) fn set_relative(&self, due: Option<Duration>) {
+        match due {
+            Some(d) => {
+                // 100-ns ticks; saturate at i64::MAX (~29,247 years).
+                let ticks = i64::try_from(d.as_nanos() / 100).unwrap_or(i64::MAX);
+                // SetThreadpoolTimer reads a negative FILETIME as relative time.
+                #[expect(
+                    clippy::arithmetic_side_effects,
+                    reason = "ticks is in [0, i64::MAX] (saturated above), so -ticks cannot overflow"
+                )]
                 let neg = -ticks;
+                let [b0, b1, b2, b3, b4, b5, b6, b7] = neg.to_le_bytes();
                 let ft = FILETIME {
-                    dwLowDateTime: neg as u32,
-                    dwHighDateTime: (neg >> 32) as u32,
+                    dwLowDateTime: u32::from_le_bytes([b0, b1, b2, b3]),
+                    dwHighDateTime: u32::from_le_bytes([b4, b5, b6, b7]),
                 };
                 // SAFETY: `self.handle` is live (closed only in `Drop`).
                 unsafe { SetThreadpoolTimer(self.handle, &raw const ft, 0, 0) };

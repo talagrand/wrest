@@ -122,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (i, repo) in search.items.iter().enumerate() {
         println!(
             "  {:>2}. {} ⭐ {} -- {}",
-            i + 1,
+            i.saturating_add(1),
             repo.full_name,
             repo.stargazers_count,
             repo.description.as_deref().unwrap_or("(no description)")

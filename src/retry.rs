@@ -331,6 +331,10 @@ mod budget {
             assert!(retry_percent >= 0.0);
             assert!(retry_percent <= 1000.0);
 
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "saturating float-to-int cast; tiny `retry_percent` overflows isize but `as isize` saturates"
+            )]
             let (deposit_amount, withdraw_amount) = if retry_percent == 0.0 {
                 (0isize, 1isize)
             } else if retry_percent <= 1.0 {
@@ -339,22 +343,31 @@ mod budget {
                 (1000, (1000.0 / retry_percent) as isize)
             };
 
-            let reserve = (min_per_sec as isize)
-                .saturating_mul(ttl.as_secs() as isize)
+            // Both conversions are exact on 64-bit. On 32-bit, only
+            // `min_per_sec > i32::MAX` could saturate, and the saturating_mul
+            // chain below would clamp to `isize::MAX` anyway.
+            let min_per_sec_isize = isize::try_from(min_per_sec).unwrap_or(isize::MAX);
+            let ttl_secs_isize = isize::try_from(ttl.as_secs()).unwrap_or(isize::MAX);
+            let reserve = min_per_sec_isize
+                .saturating_mul(ttl_secs_isize)
                 .saturating_mul(withdraw_amount);
 
-            let num_slots: usize = 10;
-            let slot_duration = ttl / num_slots as u32;
+            const NUM_SLOTS: u16 = 10;
+            #[expect(
+                clippy::arithmetic_side_effects,
+                reason = "NUM_SLOTS is a non-zero compile-time constant"
+            )]
+            let slot_duration = ttl / u32::from(NUM_SLOTS);
 
             Budget {
                 state: Mutex::new(BudgetState {
-                    buckets: vec![0isize; num_slots],
+                    buckets: vec![0isize; usize::from(NUM_SLOTS)],
                     writer: 0,
                     gen_index: 0,
                     gen_time: Instant::now(),
                 }),
                 reserve,
-                slots: num_slots,
+                slots: usize::from(NUM_SLOTS),
                 slot_duration,
                 deposit_amount,
                 withdraw_amount,
@@ -364,7 +377,9 @@ mod budget {
         pub(super) fn deposit(&self) {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             self.advance(&mut state);
-            state.writer += self.deposit_amount;
+            // Saturating: on isize::MAX clamp, budget over-permits retries
+            // for at most one slot window until `advance()` zeros writer.
+            state.writer = state.writer.saturating_add(self.deposit_amount);
         }
 
         pub(super) fn withdraw(&self) -> bool {
@@ -373,7 +388,11 @@ mod budget {
 
             let sum = self.sum(&state);
             if sum >= self.withdraw_amount {
-                state.writer -= self.withdraw_amount;
+                // Saturating: on isize::MIN clamp, budget under-permits
+                // retries for at most one slot window until `advance()`
+                // zeros writer. Cannot reach MIN in practice because the
+                // `if` above gates withdrawals on a positive balance.
+                state.writer = state.writer.saturating_sub(self.withdraw_amount);
                 true
             } else {
                 false
@@ -401,17 +420,28 @@ mod budget {
             let committed = std::mem::take(&mut state.writer);
             state.buckets[state.gen_index] = committed;
 
-            // Clear elapsed slots.
-            let mut remaining = elapsed;
-            let mut idx = (state.gen_index + 1) % self.slots;
-            while remaining > self.slot_duration {
-                state.buckets[idx] = 0;
-                remaining -= self.slot_duration;
-                idx = (idx + 1) % self.slots;
-            }
+            // Clear elapsed slots, capped at `self.slots` iterations --
+            // beyond that the whole ring is zero and further iterations
+            // are no-ops (a long suspend must not spin millions of times).
+            #[expect(
+                clippy::arithmetic_side_effects,
+                reason = "idx wraps via `% slots` where slots > 0; time arithmetic uses checked_sub"
+            )]
+            {
+                let mut remaining = elapsed;
+                let mut idx = (state.gen_index + 1) % self.slots;
+                for _ in 0..self.slots {
+                    if remaining <= self.slot_duration {
+                        break;
+                    }
+                    state.buckets[idx] = 0;
+                    remaining -= self.slot_duration;
+                    idx = (idx + 1) % self.slots;
+                }
 
-            state.gen_index = idx;
-            state.gen_time = now;
+                state.gen_index = idx;
+                state.gen_time = now;
+            }
         }
     }
 

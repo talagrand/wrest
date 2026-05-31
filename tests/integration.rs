@@ -1789,10 +1789,10 @@ async fn large_streaming_body_upload() {
     let server = MockServer::start().await;
 
     // Create a 2MB streaming body
-    let chunk_count = 128;
+    let chunk_count: u8 = 128;
     let chunk_size = 16 * 1024; // 16KB chunks
     let chunks: Vec<bytes::Bytes> = (0..chunk_count)
-        .map(|i| bytes::Bytes::from(vec![i as u8; chunk_size]))
+        .map(|byte| bytes::Bytes::from(vec![byte; chunk_size]))
         .collect();
 
     Mock::given(method("POST"))

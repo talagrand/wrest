@@ -337,8 +337,8 @@ fn io_error_from_winhttp(code: u32) -> io::Error {
         _ => None,
     };
     match mapped_kind {
-        Some(kind) => io::Error::new(kind, io::Error::from_raw_os_error(code as i32)),
-        None => io::Error::from_raw_os_error(code as i32),
+        Some(kind) => io::Error::new(kind, io::Error::from_raw_os_error(code.cast_signed())),
+        None => io::Error::from_raw_os_error(code.cast_signed()),
     }
 }
 

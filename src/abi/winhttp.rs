@@ -100,7 +100,7 @@ pub(crate) fn winhttp_set_option_u32(
             handle,
             option,
             &value as *const u32 as *const core::ffi::c_void,
-            std::mem::size_of::<u32>() as u32,
+            super::dword_size_of::<u32>(),
         ))
     }
 }
@@ -116,7 +116,7 @@ pub(crate) fn winhttp_set_option_usize(
             handle,
             option,
             &value as *const usize as *const core::ffi::c_void,
-            std::mem::size_of::<usize>() as u32,
+            super::dword_size_of::<usize>(),
         ))
     }
 }
@@ -133,7 +133,7 @@ pub(crate) fn winhttp_set_proxy_direct(handle: RawWinHttpHandle) -> Result<(), E
             handle,
             WINHTTP_OPTION_PROXY,
             &info as *const WINHTTP_PROXY_INFO as *const core::ffi::c_void,
-            std::mem::size_of::<WINHTTP_PROXY_INFO>() as u32,
+            super::dword_size_of::<WINHTTP_PROXY_INFO>(),
         ))
     }
 }
@@ -158,7 +158,7 @@ pub(crate) fn winhttp_set_proxy_named(
             handle,
             WINHTTP_OPTION_PROXY,
             &info as *const WINHTTP_PROXY_INFO as *const core::ffi::c_void,
-            std::mem::size_of::<WINHTTP_PROXY_INFO>() as u32,
+            super::dword_size_of::<WINHTTP_PROXY_INFO>(),
         ))
     }
 }
@@ -172,7 +172,7 @@ pub(crate) fn winhttp_set_proxy_named(
 /// Returns `None` if the option is not supported or the call fails.
 pub(crate) fn winhttp_query_option_u32(handle: RawWinHttpHandle, option: u32) -> Option<u32> {
     let mut value: u32 = 0;
-    let mut size = std::mem::size_of::<u32>() as u32;
+    let mut size = super::dword_size_of::<u32>();
     let ok =
         unsafe { WinHttpQueryOption(handle, option, &mut value as *mut u32 as *mut _, &mut size) };
     if ok != 0 { Some(value) } else { None }
@@ -221,7 +221,7 @@ pub(crate) fn winhttp_query_header_u32(
     info_level: u32,
 ) -> Result<u32, Error> {
     let mut value: u32 = 0;
-    let mut size = std::mem::size_of::<u32>() as u32;
+    let mut size = super::dword_size_of::<u32>();
     let mut index: u32 = 0;
     unsafe {
         check_win32_bool(WinHttpQueryHeaders(
@@ -304,8 +304,9 @@ pub(crate) fn winhttp_query_header_string(
     handle: RawWinHttpHandle,
     info_level: u32,
 ) -> Option<String> {
-    let mut buf = [0u16; 16];
-    let mut size = (buf.len() * 2) as u32;
+    const BUF_LEN: usize = 16;
+    let mut buf = [0u16; BUF_LEN];
+    let mut size = super::dword_size_of::<[u16; BUF_LEN]>();
     let mut index: u32 = 0;
     let ok = unsafe {
         WinHttpQueryHeaders(
@@ -372,11 +373,13 @@ pub(crate) fn winhttp_add_request_header(
     header_line: &str,
 ) -> Result<(), Error> {
     let wide: Vec<u16> = header_line.encode_utf16().collect();
+    let wide_len = u32::try_from(wide.len())
+        .map_err(|_| Error::request(format!("header line too long ({} chars)", wide.len())))?;
     unsafe {
         check_win32_bool(WinHttpAddRequestHeaders(
             handle,
             wide.as_ptr(),
-            wide.len() as u32,
+            wide_len,
             WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE,
         ))
     }
@@ -435,11 +438,17 @@ pub(crate) fn winhttp_receive_response(handle: RawWinHttpHandle) -> Result<(), E
 }
 
 /// `WinHttpReadData`.
+///
+/// Takes `buf_len` as `usize` and converts at the FFI boundary; any value
+/// exceeding `u32::MAX` is capped to `u32::MAX` (WinHTTP would not read
+/// more than `DWORD::MAX` in a single call regardless, and read sizes are
+/// in practice bounded by the caller's small `BytesMut` spare capacity).
 pub(crate) fn winhttp_read_data(
     handle: RawWinHttpHandle,
     buf: *mut std::ffi::c_void,
-    buf_len: u32,
+    buf_len: usize,
 ) -> Result<(), Error> {
+    let buf_len = u32::try_from(buf_len).unwrap_or(u32::MAX);
     unsafe { check_win32_bool(WinHttpReadData(handle, buf, buf_len, std::ptr::null_mut())) }
 }
 
@@ -478,21 +487,16 @@ pub(crate) fn winhttp_crack_url(url: &str) -> Result<CrackedUrl, Error> {
     }
     let wide: Vec<u16> = url.encode_utf16().collect();
 
-    let mut scheme_buf = vec![0u16; 16];
-    let mut host_buf = vec![0u16; 2048];
-    let mut path_buf = vec![0u16; 8192];
-    let mut extra_buf = vec![0u16; 8192];
-
     let mut components = URL_COMPONENTS {
-        dwStructSize: std::mem::size_of::<URL_COMPONENTS>() as u32,
-        lpszScheme: scheme_buf.as_mut_ptr(),
-        dwSchemeLength: scheme_buf.len() as u32,
-        lpszHostName: host_buf.as_mut_ptr(),
-        dwHostNameLength: host_buf.len() as u32,
-        lpszUrlPath: path_buf.as_mut_ptr(),
-        dwUrlPathLength: path_buf.len() as u32,
-        lpszExtraInfo: extra_buf.as_mut_ptr(),
-        dwExtraInfoLength: extra_buf.len() as u32,
+        dwStructSize: super::dword_size_of::<URL_COMPONENTS>(),
+        lpszScheme: std::ptr::null_mut(),
+        dwSchemeLength: u32::MAX,
+        lpszHostName: std::ptr::null_mut(),
+        dwHostNameLength: u32::MAX,
+        lpszUrlPath: std::ptr::null_mut(),
+        dwUrlPathLength: u32::MAX,
+        lpszExtraInfo: std::ptr::null_mut(),
+        dwExtraInfoLength: u32::MAX,
         nScheme: 0,
         nPort: 0,
         lpszUserName: std::ptr::null_mut(),
@@ -501,10 +505,13 @@ pub(crate) fn winhttp_crack_url(url: &str) -> Result<CrackedUrl, Error> {
         dwPasswordLength: 0,
     };
 
+    let wide_len = u32::try_from(wide.len())
+        .map_err(|_| Error::builder(format!("URL too long ({} UTF-16 code units)", wide.len())))?;
+
     unsafe {
         check_win32_bool(WinHttpCrackUrl(
             wide.as_ptr(),
-            wide.len() as u32,
+            wide_len,
             // No flags -- preserve percent-encoding as-is.
             // ICU_ESCAPE would double-encode: %3d → %253d.
             // ICU_DECODE would decode: %3d → =.
@@ -515,13 +522,19 @@ pub(crate) fn winhttp_crack_url(url: &str) -> Result<CrackedUrl, Error> {
         .map_err(|e| Error::builder(ContextError::new(format!("invalid URL: {url}"), e)))?;
     }
 
-    Ok(CrackedUrl {
-        scheme: wide_to_string(scheme_buf.as_ptr(), components.dwSchemeLength)?,
-        host: wide_to_string(host_buf.as_ptr(), components.dwHostNameLength)?,
-        port: components.nPort,
-        path: wide_to_string(path_buf.as_ptr(), components.dwUrlPathLength)?,
-        extra: wide_to_string(extra_buf.as_ptr(), components.dwExtraInfoLength)?,
-    })
+    // `components.lpsz*` alias into `wide`; the inner borrow makes the
+    // lifetime dependency syntactically visible.
+    let cracked = {
+        let _wide_keepalive = &wide;
+        CrackedUrl {
+            scheme: wide_to_string(components.lpszScheme, components.dwSchemeLength)?,
+            host: wide_to_string(components.lpszHostName, components.dwHostNameLength)?,
+            port: components.nPort,
+            path: wide_to_string(components.lpszUrlPath, components.dwUrlPathLength)?,
+            extra: wide_to_string(components.lpszExtraInfo, components.dwExtraInfoLength)?,
+        }
+    };
+    Ok(cracked)
 }
 
 // ---------------------------------------------------------------------------

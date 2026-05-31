@@ -208,13 +208,7 @@ impl Delay {
 
         match timer {
             Some(t) => {
-                // Convert Duration to 100-ns ticks, saturating to the
-                // largest representable value.  i64::MAX / 10 is about
-                // 29,247 years, so any sane Duration fits comfortably.
-                let ticks_u128 = dur.as_nanos() / 100;
-                let ticks = i64::try_from(ticks_u128).unwrap_or(i64::MAX);
-
-                t.set_relative(Some(ticks));
+                t.set_relative(Some(dur));
 
                 Self {
                     timer: Some(t),
