@@ -391,15 +391,18 @@ impl Response {
 
     /// Collect all chunks into a single `Bytes`.
     ///
-    /// No size limit is enforced -- matching reqwest, which also collects
-    /// the full body into memory.  Callers processing arbitrarily large
-    /// responses should use [`bytes_stream()`](Self::bytes_stream) instead.
+    /// Matches reqwest in collecting the full body in memory; total
+    /// length is capped at `usize::MAX` (≈4 GiB on 32-bit, returning
+    /// `Error::body`).  Use [`bytes_stream()`](Self::bytes_stream)
+    /// for unbounded streaming.
     async fn collect_body(&mut self) -> Result<Bytes, Error> {
         let mut parts: Vec<Bytes> = Vec::new();
         let mut total_len = 0usize;
 
         while let Some(chunk) = self.chunk().await? {
-            total_len += chunk.len();
+            total_len = total_len
+                .checked_add(chunk.len())
+                .ok_or_else(|| Error::body("response body too large").with_url(self.url.clone()))?;
             parts.push(chunk);
         }
 

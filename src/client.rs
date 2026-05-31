@@ -196,6 +196,7 @@ impl Client {
         // We know max >= 1.
         // Total attempts = 1 (initial) + up to `max` retries.
         let mut remaining_retries = max;
+        let mut attempt_no: u32 = 1;
 
         loop {
             // Try to clone the body. If we can't (e.g. streaming body),
@@ -231,12 +232,9 @@ impl Client {
             if let Action::Retryable = action
                 && policy.can_withdraw()
             {
-                remaining_retries -= 1;
-                trace!(
-                    attempt = max - remaining_retries + 1,
-                    url = %url,
-                    "retrying request"
-                );
+                remaining_retries = remaining_retries.saturating_sub(1);
+                attempt_no = attempt_no.saturating_add(1);
+                trace!(attempt = attempt_no, url = %url, "retrying request");
                 continue;
             }
 
@@ -275,7 +273,7 @@ impl Client {
         trace!(
             method = method_str,
             url = %url,
-            timeout_ms = remaining_timeout.map(|d| d.as_millis() as u64),
+            timeout_ms = remaining_timeout.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
             "Client::execute",
         );
 
@@ -974,11 +972,8 @@ impl ClientBuilder {
         // Saturate to i32::MAX rather than silently truncating.
         // WinHttpSetTimeouts takes i32 milliseconds (~24.8 days); any
         // Duration longer than that is effectively infinite.
-        let to_ms = |d: std::time::Duration| -> u32 {
-            u32::try_from(d.as_millis())
-                .unwrap_or(i32::MAX as u32)
-                .min(i32::MAX as u32)
-        };
+        let to_ms =
+            |d: std::time::Duration| -> i32 { i32::try_from(d.as_millis()).unwrap_or(i32::MAX) };
         let connect_timeout_ms = self.connect_timeout.map_or(60_000, to_ms); // 60s default
 
         // send/receive stall timeouts -- default 0 (infinite, no stall
@@ -1008,7 +1003,7 @@ impl ClientBuilder {
             connect_timeout_ms,
             send_timeout_ms,
             read_timeout_ms,
-            total_timeout_ms = self.timeout.map(|d| d.as_millis() as u64),
+            total_timeout_ms = self.timeout.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
             proxy = ?config.proxy,
             accept_invalid_certs = self.tls_danger_accept_invalid_certs,
             "client built",

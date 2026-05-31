@@ -6,8 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## Unreleased
 
+### Fixed
+- URL parsing: `winhttp_crack_url` previously used fixed-size buffers for URL parts - these are now preserved in full.
+- 32-bit soundness: Return failure instead of wrapping if returned bodies would overflow `usize`.
+- 32-bit soundness: Return failure instead of silently truncating oversized inputs.
+- Retry budget: the slot-advance loop is now capped at the bucket count, so a long suspend (sleep, debugger, etc.) can no longer cause huge numbers of zero-bucket iterations on the next request.
+- DLL-host safety: closed path where a panic during `HANDLE_CLOSING` callback bookkeeping could be swallowed and leave `WinHttpRequestHandle::drop` hanging in `wait_closed_and_idle`.
+
 ### Changed
 - CI - Reliability: swap `httpbin.org` for a locally-hosted version for reliability (doesn't affect local testing)
+- Enabled clippy's `cast_possible_truncation`, `cast_possible_wrap`, `cast_sign_loss`, and `arithmetic_side_effects` lints (warn) to guard against integer-overflow and 32-bit soundness regressions.
 
 ## 0.5.6
 

@@ -166,7 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         while let Some(chunk) = resp.chunk().await? {
             file.write_all(&chunk)?;
-            downloaded += chunk.len() as u64;
+            downloaded = downloaded.saturating_add(chunk.len() as u64);
 
             if show_progress {
                 print_progress(downloaded, total, start.elapsed());

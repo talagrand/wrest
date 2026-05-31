@@ -820,31 +820,27 @@ fn extract_userinfo(url: &str) -> (std::borrow::Cow<'_, str>, String, Option<Str
 /// Percent-decode a string (e.g. `%40` → `@`).
 fn percent_decode(input: &str) -> String {
     let mut out = Vec::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2]))
+    let mut rest = input.as_bytes();
+    while let [first, tail @ ..] = rest {
+        if *first == b'%'
+            && let [hi, lo, after @ ..] = tail
+            && let (Some(hi_n), Some(lo_n)) = (hex_nibble(*hi), hex_nibble(*lo))
         {
-            out.push(hi << 4 | lo);
-            i += 3;
-            continue;
+            out.push(hi_n << 4 | lo_n);
+            rest = after;
+        } else {
+            out.push(*first);
+            rest = tail;
         }
-        out.push(bytes[i]);
-        i += 1;
     }
     String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 /// Convert an ASCII hex character to its nibble value.
 fn hex_nibble(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        _ => None,
-    }
+    char::from(b)
+        .to_digit(16)
+        .and_then(|d| u8::try_from(d).ok())
 }
 
 /// Remove dot-segments from a path per RFC 3986 §5.2.4.

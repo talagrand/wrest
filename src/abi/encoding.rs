@@ -41,39 +41,45 @@ use windows_sys::Win32::Globalization::MultiByteToWideChar;
 /// transcode every code unit, so there is no way to hand the `Vec`'s
 /// memory directly to the `String`.
 pub(crate) fn multi_byte_to_string(codepage: u32, data: &[u8]) -> Result<String, Error> {
+    if data.is_empty() {
+        return Ok(String::new());
+    }
+
+    let data_len = i32::try_from(data.len()).map_err(|_| {
+        Error::decode(format!("input too large ({} bytes) for MultiByteToWideChar", data.len()))
+    })?;
     unsafe {
         // First call: query the required buffer length (in u16 elements).
-        let len = MultiByteToWideChar(
-            codepage,
-            0,
-            data.as_ptr(),
-            data.len() as i32,
-            std::ptr::null_mut(),
-            0,
-        );
-        if len <= 0 {
+        let len =
+            MultiByteToWideChar(codepage, 0, data.as_ptr(), data_len, std::ptr::null_mut(), 0);
+        let buf_cap = if let Ok(n) = usize::try_from(len)
+            && n > 0
+        {
+            n
+        } else {
             return Err(Error::decode(format!(
                 "MultiByteToWideChar failed for code page {codepage}"
             )));
-        }
+        };
 
-        // Allocate exactly `len` u16 elements -- no zero-init needed since
-        // MultiByteToWideChar will fill them.
-        let mut buf: Vec<u16> = Vec::with_capacity(len as usize);
-        let written = MultiByteToWideChar(
-            codepage,
-            0,
-            data.as_ptr(),
-            data.len() as i32,
-            buf.as_mut_ptr(),
-            len,
-        );
-        if written <= 0 {
+        // Allocate exactly `buf_cap` u16 elements -- no zero-init needed
+        // since MultiByteToWideChar will fill them.
+        let mut buf: Vec<u16> = Vec::with_capacity(buf_cap);
+        let written =
+            MultiByteToWideChar(codepage, 0, data.as_ptr(), data_len, buf.as_mut_ptr(), len);
+        let written_n = if let Ok(n) = usize::try_from(written)
+            && n > 0
+        {
+            n
+        } else {
             return Err(Error::decode(format!(
                 "MultiByteToWideChar failed for code page {codepage}"
             )));
-        }
-        buf.set_len(written as usize);
+        };
+        // Defensive clamp: `set_len` would be UB if Win32 ever reported
+        // `written_n > buf_cap`.
+        let written_n = written_n.min(buf_cap);
+        buf.set_len(written_n);
 
         string_from_utf16(&buf, "UTF-16 conversion failed")
     }
@@ -216,9 +222,7 @@ pub(crate) fn icu_decode(converter_name: &str, data: &[u8]) -> Result<String, Er
     })?;
 
     // Null-terminate the converter name for ICU's C API.
-    let mut name_buf = Vec::with_capacity(converter_name.len() + 1);
-    name_buf.extend_from_slice(converter_name.as_bytes());
-    name_buf.push(0);
+    let name_buf: Vec<u8> = [converter_name.as_bytes(), &[0]].concat();
 
     // Open the converter.
     let mut open_err = U_ZERO_ERROR;
@@ -248,17 +252,21 @@ pub(crate) fn icu_decode(converter_name: &str, data: &[u8]) -> Result<String, Er
     // input byte; for EUC-JP the output is *fewer* UChars than input
     // bytes (multi-byte sequences collapse).  So `data.len()` UChars
     // is always sufficient.  Add 1 for the NUL terminator ICU writes.
-    let capacity = data.len() + 1;
-    let mut buf: Vec<u16> = vec![0u16; capacity];
+    let too_large =
+        || Error::decode(format!("input too large ({} bytes) for ICU converter", data.len()));
+    let data_len_i32 = i32::try_from(data.len()).map_err(|_| too_large())?;
+    let capacity_i32 = data_len_i32.checked_add(1).ok_or_else(too_large)?;
+    // `cast_unsigned` is value-preserving: `capacity_i32 >= 1` by construction above.
+    let mut buf: Vec<u16> = vec![0u16; capacity_i32.cast_unsigned() as usize];
 
     let mut conv_err = U_ZERO_ERROR;
     let written = unsafe {
         (icu.ucnv_to_u_chars)(
             cnv,
             buf.as_mut_ptr(),
-            capacity as i32,
+            capacity_i32,
             data.as_ptr(),
-            data.len() as i32,
+            data_len_i32,
             &mut conv_err,
         )
     };
@@ -269,7 +277,7 @@ pub(crate) fn icu_decode(converter_name: &str, data: &[u8]) -> Result<String, Er
         )));
     }
 
-    let len = written.max(0) as usize;
+    let len = usize::try_from(written).unwrap_or(0);
     buf.truncate(len);
 
     string_from_utf16(&buf, "ICU produced invalid UTF-16")
@@ -290,6 +298,7 @@ mod tests {
         let cases: &[(u32, &[u8], &str, &str)] = &[
             (65001, b"hello world", "hello world", "UTF-8 ASCII"),
             (1252, &[0xE9], "\u{e9}", "Windows-1252 e-acute"),
+            (65001, b"", "", "empty input short-circuits to Ok\"\""),
         ];
 
         for &(codepage, data, expected, label) in cases {
@@ -301,8 +310,7 @@ mod tests {
 
     #[test]
     fn multi_byte_to_string_errors_table() {
-        let cases: &[(u32, &[u8], &str)] =
-            &[(99999, b"hello", "invalid code page"), (65001, b"", "empty input")];
+        let cases: &[(u32, &[u8], &str)] = &[(99999, b"hello", "invalid code page")];
 
         for &(codepage, data, label) in cases {
             assert!(multi_byte_to_string(codepage, data).is_err(), "{label}: should fail");

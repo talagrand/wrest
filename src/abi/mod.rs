@@ -52,6 +52,22 @@ fn to_wide(s: &str) -> Vec<u16> {
 }
 
 // ---------------------------------------------------------------------------
+// Size helpers
+// ---------------------------------------------------------------------------
+
+/// `size_of::<T>()` cast to `u32` (DWORD) for Win32 APIs.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "compile-time assert above bounds size_of::<T>() to u32::MAX"
+)]
+pub(crate) const fn dword_size_of<T>() -> u32 {
+    const {
+        assert!(std::mem::size_of::<T>() <= u32::MAX as usize, "size_of::<T>() exceeds u32::MAX");
+    };
+    std::mem::size_of::<T>() as u32
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

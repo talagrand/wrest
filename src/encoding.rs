@@ -340,8 +340,9 @@ fn decode_x_user_defined(data: &[u8]) -> String {
             if b < 0x80 {
                 b as char
             } else {
-                // SAFETY: 0xF780..=0xF7FF are valid Unicode code points (PUA).
-                char::from_u32(0xF780 + u32::from(b) - 0x80).unwrap_or('\u{FFFD}')
+                // 0xF780..=0xF7FF are all valid USVs (Supplementary PUA);
+                // `unwrap_or` is a defensive tail.
+                char::from_u32(0xF700 | u32::from(b)).unwrap_or('\u{FFFD}')
             }
         })
         .collect()
@@ -397,9 +398,10 @@ fn decode_iso_8859_16(data: &[u8]) -> String {
             if b < 0x80 {
                 b as char
             } else {
-                // Every entry in the table is a valid Unicode scalar value.
-                char::from_u32(u32::from(ISO_8859_16_HIGH[(b - 0x80) as usize]))
-                    .unwrap_or('\u{FFFD}')
+                // Every `ISO_8859_16_HIGH` entry is a valid USV;
+                // `unwrap_or` is a defensive tail.
+                let idx = (b & 0x7F) as usize;
+                char::from_u32(u32::from(ISO_8859_16_HIGH[idx])).unwrap_or('\u{FFFD}')
             }
         })
         .collect()
