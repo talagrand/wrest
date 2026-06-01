@@ -850,7 +850,7 @@ fn hex_nibble(b: u8) -> Option<u8> {
 /// Remove dot-segments from a path per RFC 3986 §5.2.4.
 ///
 /// Collapses `.` (current directory) and `..` (parent directory) segments,
-/// producing a normalised absolute path.
+/// producing a normalized absolute path.
 fn remove_dot_segments(path: &str) -> String {
     let mut output: Vec<&str> = Vec::new();
 

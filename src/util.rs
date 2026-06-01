@@ -37,7 +37,6 @@ pub(crate) fn wide_to_string(ptr: *const u16, len: u32) -> Result<String, Error>
 ///
 /// `ptr` must be a valid pointer to at least `byte_len` bytes of `u16` data,
 /// or null (returns an empty string).
-#[cfg_attr(all(not(feature = "tracing"), not(test)), expect(dead_code))]
 pub(crate) unsafe fn wide_to_string_lossy(ptr: *mut std::ffi::c_void, byte_len: u32) -> String {
     if ptr.is_null() || byte_len == 0 {
         return String::new();

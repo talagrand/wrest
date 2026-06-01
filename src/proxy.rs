@@ -570,7 +570,7 @@ mod tests {
     // priority in `from_env` (`HTTPS_PROXY` before `https_proxy`) is a no-op
     // on this platform. We only test that values are read and cached.
     //
-    // A static mutex serialises tests that mutate the process env.
+    // A static mutex serializes tests that mutate the process env.
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -590,7 +590,7 @@ mod tests {
 
         // Set requested values
         for (k, v) in vars {
-            // SAFETY: test-only; serialised by ENV_LOCK.
+            // SAFETY: test-only; serialized by ENV_LOCK.
             unsafe {
                 match v {
                     Some(val) => std::env::set_var(k, val),
@@ -603,7 +603,7 @@ mod tests {
 
         // Restore originals
         for (k, orig) in &saved {
-            // SAFETY: test-only; serialised by ENV_LOCK.
+            // SAFETY: test-only; serialized by ENV_LOCK.
             unsafe {
                 match orig {
                     Some(val) => std::env::set_var(k, val),
@@ -642,7 +642,7 @@ mod tests {
                 assert_eq!(config.https_proxy_url.as_deref(), Some("http://proxy:8080"));
 
                 // Change env vars after build -- config should be unaffected
-                // SAFETY: test-only; serialised by ENV_LOCK.
+                // SAFETY: test-only; serialized by ENV_LOCK.
                 unsafe {
                     std::env::set_var("HTTPS_PROXY", "http://changed:9090");
                     std::env::remove_var("NO_PROXY");

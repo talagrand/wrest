@@ -40,7 +40,7 @@ use wrest::StatusCode;
 /// Build a client with sensible defaults for real-world tests
 fn test_client() -> Client {
     Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
         .build()
         .expect("client build should succeed")
 }
@@ -145,6 +145,65 @@ async fn httpbin_redirect_chain() {
     );
 }
 
+/// Parity test (runs on both backends): with `Client::builder().https_only(true)`,
+/// a redirect target of `http://` must surface a redirect-policy `Err`. The
+/// WinHTTP backend translates `_DISALLOW_HTTPS_TO_HTTP`'s silently-surfaced
+/// 30x into the same error shape that reqwest produces natively.
+#[tokio::test]
+#[cfg(any(native_winhttp, feature = "default-tls", feature = "native-tls"))]
+async fn https_only_blocks_https_to_http_redirect() {
+    // Always hits live https httpbin: CI's local override is http-only, which would trip https_only on the initial leg before any redirect.
+    let target = "https://httpbin.org/redirect-to?url=http%3A%2F%2Fexample.com%2F&status_code=302";
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .https_only(true)
+        .build()
+        .expect("client build should succeed");
+
+    let err = client
+        .get(target)
+        .send()
+        .await
+        .expect_err("https_only must reject https->http redirect");
+
+    let mut chain = String::new();
+    let mut cur: Option<&dyn std::error::Error> = Some(&err);
+    while let Some(e) = cur {
+        if !chain.is_empty() {
+            chain.push_str(" | ");
+        }
+        chain.push_str(&e.to_string());
+        cur = e.source();
+    }
+    assert!(err.is_redirect(), "expected is_redirect(), got chain: {chain}");
+    let lc = chain.to_lowercase();
+    assert!(
+        lc.contains("http") || lc.contains("scheme") || lc.contains("url"),
+        "expected a scheme/URL-related error, got: {chain}"
+    );
+}
+
+/// WinHTTP-only: even with the *default* client (no `https_only`), an
+/// https->http redirect is blocked by the WinHTTP option default and wrest
+/// surfaces a redirect-policy `Err` rather than a silent 30x.
+#[tokio::test]
+#[cfg(native_winhttp)]
+async fn winhttp_default_blocks_https_to_http_redirect() {
+    // Always hits live https httpbin: the policy only fires on an https->http downgrade, which CI's http-only local override can't produce.
+    let target = "https://httpbin.org/redirect-to?url=http%3A%2F%2Fexample.com%2F&status_code=302";
+
+    let client = test_client();
+
+    let err = client
+        .get(target)
+        .send()
+        .await
+        .expect_err("default WinHTTP client must reject https->http redirect");
+
+    assert!(err.is_redirect(), "expected is_redirect(), got: {err}");
+}
+
 /// Test httpbin /gzip - real gzip compression
 // WinHTTP always sends `Accept-Encoding: gzip, deflate` and auto-decompresses;
 // reqwest only does this when its `gzip` feature is enabled.
@@ -231,7 +290,7 @@ async fn badssl_invalid_certs_rejected() {
 async fn badssl_with_accept_invalid_certs() {
     // With tls_danger_accept_invalid_certs, we should succeed
     let client = Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
         .tls_danger_accept_invalid_certs(true)
         .build()
         .expect("client should build");

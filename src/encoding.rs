@@ -179,7 +179,7 @@ fn is_utf8_label(label: &str) -> bool {
 /// Maps every WHATWG Encoding Standard label to a Windows code page.
 ///
 /// Labels are expected to be already ASCII-lowercased and trimmed.
-/// Returns `None` for unrecognised labels.
+/// Returns `None` for unrecognized labels.
 fn whatwg_label_to_codepage(label: &str) -> Option<u32> {
     Some(match label {
         // -- UTF-8 ----------------------------------------------------
