@@ -177,7 +177,7 @@ pub struct Url {
     pub(crate) username: String,
     /// Password from the `user:password@host` portion, percent-decoded.
     /// `None` when not present.
-    pub(crate) password: Option<String>,
+    pub(crate) password: Option<crate::redact::Redacted<String>>,
 }
 
 impl Url {
@@ -431,19 +431,21 @@ impl Url {
     /// Returns `None` when no password is present in the URL.
     /// Equivalent to `url::Url::password()`.
     pub fn password(&self) -> Option<&str> {
-        self.password.as_deref()
+        self.password.as_ref().map(|r| r.expose().as_str())
     }
 }
 
 impl std::fmt::Display for Url {
+    // `serialized` is built sans userinfo at parse time; no password leak via `{}`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.serialized)
     }
 }
 
 impl std::fmt::Debug for Url {
-    /// Matches `url::Url`'s derived Debug format so that diagnostic output is
-    /// identical regardless of whether the native backend or reqwest passthrough is active.
+    /// Closely matches `url::Url`'s derived Debug format so that
+    /// diagnostic output is identical regardless of which backend is
+    /// active. The `password` field is redacted, however, unlike the `url` crate.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // url::Url shows host as `Some(Domain("..."))` for http/https.
         struct HostDebug<'a>(&'a str);
@@ -578,6 +580,7 @@ impl Url {
         // strips it from HTTP(S) URLs. We parse it manually from the raw
         // string: look for `://`, then find `@` before the next `/`.
         let (url_without_userinfo, username, password) = extract_userinfo(url_for_crack);
+        let password = password.map(crate::redact::Redacted::new);
 
         let cracked = abi::winhttp_crack_url(url_without_userinfo.as_ref())
             .map_err(|_| ParseError::InvalidUrl)?;
@@ -715,6 +718,7 @@ impl Url {
             },
             None => (String::new(), None),
         };
+        let password = password.map(crate::redact::Redacted::new);
 
         // http::Uri does not carry fragments.
         let fragment = None;
@@ -1088,6 +1092,27 @@ mod tests {
         assert!(debug.contains("host: Some(Domain(\"example.com\"))"), "host: {debug}");
         assert!(debug.contains("path: \"/path\""), "path: {debug}");
         assert!(debug.contains("port: None"), "default port should be None: {debug}");
+    }
+
+    #[test]
+    fn url_debug_redacts_password() {
+        // `Url::Debug` must not leak the password field -- panic messages,
+        // `dbg!`, and `tracing` events with `?error` formatters all reach
+        // Debug.
+        let url: Url = "https://alice:s3cret@example.com/path".parse().unwrap();
+        let debug = format!("{url:?}");
+        assert!(!debug.contains("s3cret"), "Debug must redact password: {debug}");
+        assert!(
+            debug.contains("password: Some(\"<redacted>\")"),
+            "Debug should preserve Some/None shape with placeholder: {debug}"
+        );
+        // Username is not a secret in the URL spec; keep it visible.
+        assert!(debug.contains("username: \"alice\""), "username should remain visible: {debug}");
+        // Display path stays clean as well.
+        assert_eq!(format!("{url}"), "https://example.com/path");
+        // No-password URLs render `password: None`.
+        let nopw: Url = "https://example.com/path".parse().unwrap();
+        assert!(format!("{nopw:?}").contains("password: None"), "no-password URL should show None");
     }
 
     #[test]

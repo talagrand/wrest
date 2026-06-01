@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ## Unreleased
 
 ### Fixed
+- Secret redaction: `Debug` output for `Url` and `Proxy` (and `Error`, transitively) now redacts the URL password and proxy Basic-auth password. `Display` already omitted them where provided.
 - URL parsing: `winhttp_crack_url` previously used fixed-size buffers for URL parts - these are now preserved in full.
 - 32-bit soundness: Return failure instead of wrapping if returned bodies would overflow `usize`.
 - 32-bit soundness: Return failure instead of silently truncating oversized inputs.

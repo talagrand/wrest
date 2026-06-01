@@ -499,7 +499,7 @@ impl RequestBuilder {
         // Only inject if no Authorization header was already set.
         if !url.username.is_empty() && !header_map.contains_key(http::header::AUTHORIZATION) {
             let credentials = match &url.password {
-                Some(pass) => format!("{}:{pass}", url.username),
+                Some(pass) => format!("{}:{}", url.username, pass.expose()),
                 None => format!("{}:", url.username),
             };
             use base64::Engine;

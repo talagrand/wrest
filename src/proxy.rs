@@ -33,7 +33,7 @@ pub struct Proxy {
     kind: ProxyKind,
     url: String,
     /// Optional Basic-auth credentials for the proxy.
-    creds: Option<(String, String)>,
+    creds: Option<(String, crate::redact::Redacted<String>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,7 +145,7 @@ impl Proxy {
     /// Matches [`reqwest::Proxy::basic_auth()`](https://docs.rs/reqwest/latest/reqwest/struct.Proxy.html#method.basic_auth).
     #[must_use]
     pub fn basic_auth(mut self, username: &str, password: &str) -> Proxy {
-        self.creds = Some((username.to_owned(), password.to_owned()));
+        self.creds = Some((username.to_owned(), crate::redact::Redacted::new(password.to_owned())));
         self
     }
 
@@ -238,9 +238,9 @@ pub(crate) struct ProxyConfig {
     /// Parsed `NO_PROXY` patterns (from `NO_PROXY` or `no_proxy`).
     pub no_proxy: Vec<NoProxyPattern>,
     /// Optional Basic-auth credentials for the HTTP proxy.
-    pub http_proxy_creds: Option<(String, String)>,
+    pub http_proxy_creds: Option<(String, crate::redact::Redacted<String>)>,
     /// Optional Basic-auth credentials for the HTTPS proxy.
-    pub https_proxy_creds: Option<(String, String)>,
+    pub https_proxy_creds: Option<(String, crate::redact::Redacted<String>)>,
 }
 
 /// What proxy action to take for a given request.
@@ -250,7 +250,7 @@ pub(crate) enum ProxyAction {
     Direct,
     /// Use the specified proxy URL (`HTTP_PROXY` / `HTTPS_PROXY`),
     /// with optional Basic-auth credentials `(username, password)`.
-    Named(String, Option<(String, String)>),
+    Named(String, Option<(String, crate::redact::Redacted<String>)>),
     /// Use OS auto-detection (WPAD/PAC + system settings).
     Automatic,
 }
@@ -684,11 +684,29 @@ mod tests {
     // -- Proxy::basic_auth() --
 
     #[test]
-    fn proxy_basic_auth_stores_credentials() {
-        let proxy = Proxy::all("http://proxy:8080").unwrap();
-        let proxy = proxy.basic_auth("user", "pass");
+    fn proxy_basic_auth_stores_and_redacts_credentials() {
+        let proxy = Proxy::all("http://proxy:8080")
+            .unwrap()
+            .basic_auth("bob", "p@55w0rd");
+
+        // basic_auth stores the credentials on the Proxy struct, with the
+        // password wrapped so Debug cannot reach it.
         assert_eq!(proxy.url, "http://proxy:8080");
-        assert_eq!(proxy.creds, Some(("user".to_owned(), "pass".to_owned())));
+        assert_eq!(
+            proxy.creds,
+            Some(("bob".to_owned(), crate::redact::Redacted::new("p@55w0rd".to_owned())))
+        );
+
+        // Proxy creds are *only* held in this struct (not embedded in the
+        // URL), so any `?proxy` formatter is the sole leak vector.
+        let debug = format!("{proxy:?}");
+        assert!(!debug.contains("p@55w0rd"), "Debug must redact password: {debug}");
+        assert!(debug.contains("\"bob\""), "username should remain visible: {debug}");
+        assert!(debug.contains("<redacted>"), "placeholder should be present: {debug}");
+
+        // No-creds proxy keeps a None.
+        let bare = Proxy::all("http://proxy:8080").unwrap();
+        assert!(format!("{bare:?}").contains("creds: None"), "no-creds proxy should show None");
     }
 
     #[test]
@@ -699,17 +717,13 @@ mod tests {
         let mut config = ProxyConfig::none();
         proxy.apply_to(&mut config);
         // Credentials should be stored on the config
-        assert_eq!(config.http_proxy_creds, Some(("alice".to_owned(), "s3cret".to_owned())));
-        assert_eq!(config.https_proxy_creds, Some(("alice".to_owned(), "s3cret".to_owned())));
+        let expected_creds =
+            Some(("alice".to_owned(), crate::redact::Redacted::new("s3cret".to_owned())));
+        assert_eq!(config.http_proxy_creds, expected_creds);
+        assert_eq!(config.https_proxy_creds, expected_creds);
         // And flow through resolve() into the ProxyAction
         let action = config.resolve("example.com", true);
-        assert_eq!(
-            action,
-            ProxyAction::Named(
-                "http://proxy:8080".into(),
-                Some(("alice".to_owned(), "s3cret".to_owned()))
-            )
-        );
+        assert_eq!(action, ProxyAction::Named("http://proxy:8080".into(), expected_creds));
     }
 
     // -- Proxy::no_proxy() --
@@ -772,7 +786,7 @@ mod tests {
             ("https", "http://https-only:8080", None, Some("http://https-only:8080"), "https only"),
         ];
 
-        let creds = Some(("u".to_owned(), "p".to_owned()));
+        let creds = Some(("u".to_owned(), crate::redact::Redacted::new("p".to_owned())));
         for &(scheme, url, exp_http, exp_https, label) in cases {
             let proxy = match scheme {
                 "http" => Proxy::http(url),
