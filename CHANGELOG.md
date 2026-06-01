@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to Semantic Versioning.
 
-## Unreleased
+## 0.5.7
 
 ### Fixed
 - Secret redaction: `Debug` output for `Url` and `Proxy` (and `Error`, transitively) now redacts the URL password and proxy Basic-auth password. `Display` already omitted them where provided.
