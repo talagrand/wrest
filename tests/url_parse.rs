@@ -158,7 +158,7 @@ async fn whatwg_urltestdata() {
     assert!(tested >= 100, "too few tests ran: {tested}");
     assert!(rfc_clean_tested >= 40, "too few RFC-clean tests: {rfc_clean_tested}");
 
-    // RFC-clean URLs MUST match exactly — zero failures.
+    // RFC-clean URLs MUST match exactly -- zero failures.
     assert!(
         rfc_clean_failures.is_empty(),
         "RFC-clean URLs had {} failures:\n{}",
@@ -196,7 +196,7 @@ fn is_rfc_clean_input(input: &str) -> bool {
     {
         return false;
     }
-    // Trailing bare `#` or `?#` — empty fragment/query representation
+    // Trailing bare `#` or `?#` -- empty fragment/query representation
     // differs between url::Url (Some("")) and WHATWG test expectations ("").
     if input.ends_with('#') || input.ends_with("?#") {
         return false;

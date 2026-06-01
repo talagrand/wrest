@@ -217,11 +217,44 @@ pub(crate) struct RequestState {
     /// Storing it in the `Arc<RequestState>` (which outlives `HANDLE_CLOSING`)
     /// guarantees the buffer remains valid.
     pub send_body: Mutex<Option<bytes::Bytes>>,
+    /// Origin of the current hop. Updated by `STATUS_REDIRECT`.
+    /// See `strip_sensitive_headers_on_cross_origin_redirect`.
+    pub current_origin: Mutex<Origin>,
+    /// Set by a callback that decided to abort the request itself
+    /// (e.g. failed sensitive-header strip on a cross-origin redirect).
+    /// `Drop` checks this to skip a double `WinHttpCloseHandle` and
+    /// `callback_error_to_error` takes the reason instead of returning
+    /// the generic `OPERATION_CANCELLED`.
+    pub callback_abort: Mutex<CallbackAbort>,
+}
+
+/// Combined "did a callback abort us?" + "what reason?" so they can't
+/// disagree.  `Aborted` is sticky: the variant stays `Aborted` even
+/// after `take_reason` consumes the inner `Option`.
+#[derive(Debug)]
+pub(crate) enum CallbackAbort {
+    NotAborted,
+    Aborted(Option<Error>),
+}
+
+impl CallbackAbort {
+    pub fn is_aborted(&self) -> bool {
+        matches!(self, Self::Aborted(_))
+    }
+
+    pub fn take_reason(&mut self) -> Option<Error> {
+        match self {
+            Self::Aborted(slot) => slot.take(),
+            Self::NotAborted => None,
+        }
+    }
 }
 
 impl RequestState {
-    /// Create a new `RequestState`.
-    pub fn new(verbose: bool) -> Self {
+    /// Create a new `RequestState` seeded with the initial request's
+    /// origin so the `STATUS_REDIRECT` callback can detect cross-origin
+    /// hops and strip sensitive headers.
+    pub fn new(verbose: bool, origin: Origin) -> Self {
         Self {
             signal: CompletionSignal::new(),
             verbose,
@@ -233,7 +266,14 @@ impl RequestState {
             close_idle: Condvar::new(),
             read_buffer: Mutex::new(None),
             send_body: Mutex::new(None),
+            current_origin: Mutex::new(origin),
+            callback_abort: Mutex::new(CallbackAbort::NotAborted),
         }
+    }
+
+    #[cfg(test)]
+    pub fn new_test() -> Self {
+        Self::new(false, Origin::new("http", "test.local", 80))
     }
 
     fn enter_callback(&self) -> RequestCallbackGuard<'_> {
@@ -255,6 +295,26 @@ impl RequestState {
         if close_state.active_callbacks == 0 {
             self.close_idle.notify_all();
         }
+    }
+
+    /// Close the WinHTTP handle from inside a callback and stash the
+    /// reason for the awaiting future.  Idempotent (first caller wins).
+    /// `WinHttpCloseHandle` is documented as legal from a status
+    /// callback -- see WinHTTP "Security Considerations".
+    pub fn abort_from_callback(&self, handle: *mut core::ffi::c_void, reason: Error) {
+        // Release the lock before the FFI close: WinHttpCloseHandle may
+        // queue more callbacks that need the same lock.
+        {
+            let mut guard = lock_or_clear(&self.callback_abort);
+            if guard.is_aborted() {
+                return;
+            }
+            *guard = CallbackAbort::Aborted(Some(reason));
+        }
+        // Reason already stashed; a close failure here (null handle,
+        // racing double-close) doesn't change the formal property the
+        // awaiter relies on.
+        let _ = abi::close_winhttp_handle(handle);
     }
 
     fn wait_closed_and_idle(&self) {
@@ -343,7 +403,11 @@ impl Drop for WinHttpRequestHandle {
             });
         }
 
-        if abi::close_winhttp_handle(self.handle) {
+        if lock_or_clear(&self.state.callback_abort).is_aborted() {
+            // Callback already closed the handle; still wait for
+            // HANDLE_CLOSING before the Arc<RequestState> can drop.
+            self.state.wait_closed_and_idle();
+        } else if abi::close_winhttp_handle(self.handle) {
             self.state.wait_closed_and_idle();
         }
         self.handle = std::ptr::null_mut();
@@ -377,7 +441,7 @@ unsafe impl Sync for RequestState {}
 /// Called by WinHTTP on its internal thread pool. `dw_context` must be the
 /// raw pointer from a live [`CallbackContext<RequestState>`].
 pub(crate) unsafe extern "system" fn winhttp_callback(
-    _hinternet: *mut core::ffi::c_void,
+    hinternet: *mut core::ffi::c_void,
     dw_context: usize,
     dw_status: u32,
     lpv_info: *mut std::ffi::c_void,
@@ -391,7 +455,9 @@ pub(crate) unsafe extern "system" fn winhttp_callback(
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // SAFETY: caller (WinHTTP) upholds the contract documented on
         // `winhttp_callback`.
-        unsafe { winhttp_callback_body(dw_context, dw_status, lpv_info, dw_info_length) };
+        unsafe {
+            winhttp_callback_body(hinternet, dw_context, dw_status, lpv_info, dw_info_length)
+        };
     }));
 }
 
@@ -402,6 +468,7 @@ pub(crate) unsafe extern "system" fn winhttp_callback(
 ///
 /// Same contract as [`winhttp_callback`].
 unsafe fn winhttp_callback_body(
+    hinternet: *mut core::ffi::c_void,
     dw_context: usize,
     dw_status: u32,
     lpv_info: *mut std::ffi::c_void,
@@ -482,6 +549,36 @@ unsafe fn winhttp_callback_body(
             // Don't signal -- the subsequent REQUEST_ERROR will carry the error.
         }
 
+        WINHTTP_CALLBACK_STATUS_REDIRECT => {
+            // SAFETY: lpv_info is a null-terminated UTF-16 string; dw_info_length
+            // is the byte count.
+            let new_url = unsafe { crate::util::wide_to_string_lossy(lpv_info, dw_info_length) };
+            // Parse first so logs/errors only ever carry the redacted Url --
+            // Display strips userinfo, but the raw `new_url` may contain
+            // `user:pass@host` and must not be traced or embedded as-is.
+            match new_url.parse::<crate::url::Url>() {
+                Ok(parsed) => {
+                    #[cfg(feature = "tracing")]
+                    if state.verbose {
+                        trace!(url = %parsed, "WinHTTP: redirect");
+                    }
+                    strip_sensitive_headers_on_cross_origin_redirect(hinternet, state, &parsed);
+                }
+                Err(_) => {
+                    // Unparsable target -> can't classify origin ->
+                    // abort before WinHTTP sends sensitive headers on.
+                    // The raw target can't really be redacted, since it's unparsable
+                    state.abort_from_callback(
+                        hinternet,
+                        Error::request(format!(
+                            "WinHTTP redirect target is unparsable; aborting to avoid \
+                             leaking sensitive headers to an unclassifiable origin: {new_url}"
+                        )),
+                    );
+                }
+            }
+        }
+
         // Verbose logging for connection-level events
         #[cfg(feature = "tracing")]
         status => {
@@ -543,12 +640,109 @@ fn log_verbose_status(status: u32, info: *mut std::ffi::c_void, info_len: u32) {
             };
             trace!(bytes = bytes, "WinHTTP: response received");
         }
-        WINHTTP_CALLBACK_STATUS_REDIRECT => {
-            let url = unsafe { crate::util::wide_to_string_lossy(info, info_len) };
-            trace!(url = %url, "WinHTTP: redirect");
-        }
         _ => {}
     }
+}
+
+/// Header names that must be stripped from a WinHTTP request when a
+/// redirect crosses origins.
+///
+/// Per [WinHTTP Security Considerations](https://learn.microsoft.com/windows/win32/winhttp/winhttp-security-considerations)
+/// item 16, WinHTTP forwards user-defined headers across redirects
+/// unchanged; the application must intercept `STATUS_REDIRECT` and
+/// remove sensitive headers when the redirect target differs from the
+/// original (or current) origin.
+const SENSITIVE_HEADERS_ON_CROSS_ORIGIN: &[&str] = &[
+    "Authorization",
+    "Cookie",
+    "Cookie2",
+    "Proxy-Authorization",
+    "Proxy-Authenticate",
+    "WWW-Authenticate",
+];
+
+/// HTTP origin per RFC 6454 (`scheme` + `host` + `port`). Used to
+/// decide whether a redirect crosses origins and the `Authorization` /
+/// `Cookie` / ... headers must be stripped before the next hop. Scheme
+/// and host are stored lower-cased so comparisons are case-insensitive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Origin {
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+}
+
+impl Origin {
+    /// Build an `Origin`, lower-casing scheme and host so comparisons
+    /// are case-insensitive.
+    pub fn new(scheme: &str, host: &str, port: u16) -> Self {
+        Self {
+            scheme: scheme.to_ascii_lowercase(),
+            host: host.to_ascii_lowercase(),
+            port,
+        }
+    }
+
+    /// Build an `Origin` from a parsed wrest URL.
+    pub fn from_url(url: &crate::url::Url) -> Self {
+        Self::new(&url.scheme, &url.host, url.port)
+    }
+}
+
+/// Strip sensitive headers when `new_url` is on a different origin
+/// than the tracked origin in `state`, then update the tracked origin.
+///
+/// Called from `WINHTTP_CALLBACK_STATUS_REDIRECT` after the caller has
+/// parsed the target into a [`crate::url::Url`].  `WinHttpAddRequestHeaders`
+/// (and removal) is callable inside this callback before the redirected
+/// request goes on the wire (WinHTTP Security Considerations item 16).
+///
+/// Fails closed: any strip failure aborts the request via
+/// [`RequestState::abort_from_callback`] so WinHTTP never sends
+/// `Authorization`/`Cookie`/etc. on to the new origin.
+fn strip_sensitive_headers_on_cross_origin_redirect(
+    request_handle: *mut core::ffi::c_void,
+    state: &RequestState,
+    new_url: &crate::url::Url,
+) {
+    strip_sensitive_headers_on_cross_origin_redirect_with(
+        request_handle,
+        state,
+        new_url,
+        crate::abi::winhttp_remove_request_header,
+    );
+}
+
+/// Test seam: injectable remove-header for unit tests.
+fn strip_sensitive_headers_on_cross_origin_redirect_with(
+    request_handle: *mut core::ffi::c_void,
+    state: &RequestState,
+    new_url: &crate::url::Url,
+    remove_header: impl Fn(*mut core::ffi::c_void, &str) -> Result<(), Error>,
+) {
+    let mut guard = lock_or_clear(&state.current_origin);
+    let new_origin = Origin::from_url(new_url);
+    if *guard == new_origin {
+        return;
+    }
+
+    for name in SENSITIVE_HEADERS_ON_CROSS_ORIGIN {
+        if let Err(e) = remove_header(request_handle, name) {
+            state.abort_from_callback(
+                request_handle,
+                Error::request(ContextError::new(
+                    format!(
+                        "failed to strip {name} on cross-origin redirect to {new_url}; \
+                         aborting to avoid sensitive-header leak"
+                    ),
+                    e,
+                )),
+            );
+            return;
+        }
+    }
+
+    *guard = new_origin;
 }
 
 // ---------------------------------------------------------------------------
@@ -729,7 +923,7 @@ pub(crate) async fn execute_request(
     );
 
     // Create the per-request state
-    let state = Arc::new(RequestState::new(session.verbose));
+    let state = Arc::new(RequestState::new(session.verbose, Origin::from_url(url)));
 
     // Decompose the body into its inner representation so we can
     // distinguish in-memory bytes from streaming bodies.
@@ -1257,7 +1451,7 @@ fn query_version(h_request: *mut core::ffi::c_void) -> Version {
 ///
 /// Protocol flags take precedence when available; otherwise falls back to
 /// the version header string.  Defaults to HTTP/1.1 if neither source
-/// provides a recognised version.
+/// provides a recognized version.
 fn resolve_version(protocol_flags: Option<u32>, version_str: Option<&str>) -> Version {
     // Since Windows 10 1607: query the negotiated HTTP protocol.
     // Fallback: the option returns None and we fall through to the
@@ -1293,6 +1487,12 @@ fn resolve_version(protocol_flags: Option<u32>, version_str: Option<&str>) -> Ve
 
 /// Create an Error from a WinHTTP callback error, enriching with TLS details.
 fn callback_error_to_error(code: u32, state: &RequestState, url: &Url) -> Error {
+    // Callback-initiated abort: surface its reason instead of the
+    // generic OPERATION_CANCELLED that WinHttpCloseHandle raises.
+    if let Some(reason) = lock_or_clear(&state.callback_abort).take_reason() {
+        return reason.with_url(url.clone());
+    }
+
     let mut err = Error::from_win32(code);
     err.inner.url = Some(Box::new(url.clone()));
 
@@ -1441,7 +1641,7 @@ mod tests {
                 expected_status: 200,
             },
             Case {
-                label: "Policy::none() → 302 returned as-is",
+                label: "Policy::none() -> 302 returned as-is",
                 proxy: ProxyAction::Automatic,
                 redirect_policy: Some(Policy::none()),
                 src_path: "/rp-src",
@@ -1450,7 +1650,7 @@ mod tests {
                 expected_status: 302,
             },
             Case {
-                label: "Policy::limited(5) → redirect followed",
+                label: "Policy::limited(5) -> redirect followed",
                 proxy: ProxyAction::Automatic,
                 redirect_policy: Some(Policy::limited(5)),
                 src_path: "/lim-src",
@@ -1558,7 +1758,7 @@ mod tests {
         let url: Url = format!("{}/np-direct", server.uri()).parse().unwrap();
 
         // Build a ProxyConfig whose NO_PROXY list matches 127.0.0.1 (the
-        // wiremock server address), causing resolve() → Direct.
+        // wiremock server address), causing resolve() -> Direct.
         let mut proxy_config = ProxyConfig::none();
         crate::NoProxy::from_string("127.0.0.1")
             .unwrap()
@@ -1625,7 +1825,7 @@ mod tests {
     #[test]
     fn callback_event_into_result() {
         let url: Url = "https://example.com".parse().unwrap();
-        let state = RequestState::new(false);
+        let state = RequestState::new_test();
 
         // (event, expected_outcome)
         // Ok(()) for success, Err("kind") for which is_* should be true
@@ -1685,11 +1885,11 @@ mod tests {
             // Happy path
             assert_eq!(method(happy_event, &url).unwrap(), expected_val, "{label}: happy");
 
-            // Wrong variant → is_request error
+            // Wrong variant -> is_request error
             let err = method(wrong_event, &url).unwrap_err();
             assert!(err.is_request(), "{label}: wrong variant should be request error");
 
-            // Timeout variant → is_timeout error
+            // Timeout variant -> is_timeout error
             let err = method(CallbackEvent::Win32Error(ERROR_WINHTTP_TIMEOUT), &url).unwrap_err();
             assert!(err.is_timeout(), "{label}: timeout variant");
         }
@@ -1705,21 +1905,6 @@ mod tests {
         assert_eq!(err.to_string(), "error sending request");
         let source = std::error::Error::source(&err).expect("should have source");
         assert!(source.to_string().contains("cancelled"));
-    }
-
-    // -- Additional error path coverage --
-
-    // NOTE: WinHTTP error-code → ErrorKind classification is covered
-    // exhaustively in error.rs::win32_classification_table.
-
-    #[test]
-    fn callback_error_to_error_preserves_url() {
-        let url: Url = "https://example.com/test".parse().unwrap();
-        let state = RequestState::new(false);
-        let err = callback_error_to_error(ERROR_WINHTTP_TIMEOUT, &state, &url);
-
-        assert!(err.is_timeout());
-        assert_eq!(err.url().map(|u| u.as_str()), Some("https://example.com/test"));
     }
 
     /// Reject WinHTTP status codes that don't fit in `u16` before the cast,
@@ -1788,7 +1973,7 @@ mod tests {
     #[test]
     fn tls_failure_enrichment() {
         let url: Url = "https://example.com".parse().unwrap();
-        let state = RequestState::new(false);
+        let state = RequestState::new_test();
 
         // Simulate a TLS failure flag being set
         state
@@ -1905,7 +2090,7 @@ mod tests {
     /// when `HANDLE_CLOSING` arrives with no other callbacks in flight.
     #[test]
     fn mark_final_callback_seen_quiescent_notifies() {
-        let state = RequestState::new(false);
+        let state = RequestState::new_test();
         state.mark_final_callback_seen();
         assert!(state.lock_close_state().closed);
     }
@@ -1915,9 +2100,8 @@ mod tests {
     // ---------------------------------------------------------------------
     //
     // Drives `winhttp_callback` directly to cover every signaling status
-    // arm plus the `WRITE_COMPLETE` null/length guards. The `REQUEST_ERROR`
-    // and `SECURE_FAILURE` arms (which also null/length-guard `lpv_info`)
-    // are exercised in `winhttp_callback_null_lpv_info_guarded` below.
+    // arm plus the null/length guards on `lpv_info` (WRITE_COMPLETE,
+    // REQUEST_ERROR, and SECURE_FAILURE).
 
     enum LpvInfo {
         Null,
@@ -1952,7 +2136,7 @@ mod tests {
     ) -> (Poll<Result<CallbackEvent, SignalCancelled>>, bool, usize, u32) {
         use std::task::{Context, Waker};
 
-        let state = Arc::new(RequestState::new(false));
+        let state = Arc::new(RequestState::new_test());
         let listener = state.signal.listen();
         let ctx = CallbackContext::new(&state);
 
@@ -2095,6 +2279,18 @@ mod tests {
                 }),
                 expected_tls_flags: 0,
             },
+            // Null-guard: with no AsyncResult payload, the arm must
+            // fall back to INTERNAL_ERROR rather than deref NULL.
+            Case {
+                label: "REQUEST_ERROR with NULL lpv_info -> Win32Error(INTERNAL_ERROR) [null-guarded]",
+                status: WINHTTP_CALLBACK_STATUS_REQUEST_ERROR,
+                info_len: 0,
+                lpv_info: LpvInfo::Null,
+                expected: DispatchOutcome::Signaled(|e| {
+                    matches!(e, CallbackEvent::Win32Error(ERROR_WINHTTP_INTERNAL_ERROR))
+                }),
+                expected_tls_flags: 0,
+            },
             // SECURE_FAILURE stores flags; the subsequent REQUEST_ERROR signals.
             Case {
                 label: "SECURE_FAILURE(INVALID_CA) -> flags stored, no signal",
@@ -2115,6 +2311,16 @@ mod tests {
                 expected: DispatchOutcome::Pending,
                 expected_tls_flags: WINHTTP_CALLBACK_STATUS_FLAG_CERT_CN_INVALID
                     | WINHTTP_CALLBACK_STATUS_FLAG_CERT_DATE_INVALID,
+            },
+            // Null-guard: REQUEST_ERROR follow-up carries the error;
+            // here the arm must just leave flags at 0 without UB.
+            Case {
+                label: "SECURE_FAILURE with NULL lpv_info -> no signal, flags stay 0 [null-guarded]",
+                status: WINHTTP_CALLBACK_STATUS_SECURE_FAILURE,
+                info_len: 0,
+                lpv_info: LpvInfo::Null,
+                expected: DispatchOutcome::Pending,
+                expected_tls_flags: 0,
             },
             // Verbose-only statuses must not signal.
             Case {
@@ -2191,7 +2397,7 @@ mod tests {
     /// any `wait_closed_and_idle` waiter.
     #[test]
     fn winhttp_callback_handle_closing_releases_retained_arc() {
-        let state = Arc::new(RequestState::new(false));
+        let state = Arc::new(RequestState::new_test());
         let ctx = CallbackContext::new(&state);
 
         // Hand the retained ref to the simulated callback; strong=2 now.
@@ -2215,38 +2421,6 @@ mod tests {
         let close = state.lock_close_state();
         assert!(close.closed, "HANDLE_CLOSING must set closed=true");
         assert_eq!(close.active_callbacks, 0, "active_callbacks must balance to 0");
-    }
-
-    /// Both `REQUEST_ERROR` and `SECURE_FAILURE` arms must null/length-guard
-    /// the `lpv_info` deref: `REQUEST_ERROR` falls back to
-    /// `ERROR_WINHTTP_INTERNAL_ERROR`, `SECURE_FAILURE` to `tls_flags == 0`.
-    #[test]
-    fn winhttp_callback_null_lpv_info_guarded() {
-        // REQUEST_ERROR with NULL lpv_info -> internal-error signal, no UB.
-        let (poll, _closed, active, _flags) =
-            drive_callback(WINHTTP_CALLBACK_STATUS_REQUEST_ERROR, &LpvInfo::Null, 0);
-        assert_eq!(active, 0, "REQUEST_ERROR NULL: active_callbacks must balance to 0");
-        match poll {
-            Poll::Ready(Ok(CallbackEvent::Win32Error(code))) => {
-                assert_eq!(
-                    code, ERROR_WINHTTP_INTERNAL_ERROR,
-                    "REQUEST_ERROR NULL: must signal INTERNAL_ERROR fallback"
-                );
-            }
-            other => {
-                panic!("REQUEST_ERROR NULL: expected Win32Error(INTERNAL_ERROR), got {other:?}")
-            }
-        }
-
-        // SECURE_FAILURE with NULL lpv_info -> no signal, flags stay 0, no UB.
-        let (poll, _closed, active, flags) =
-            drive_callback(WINHTTP_CALLBACK_STATUS_SECURE_FAILURE, &LpvInfo::Null, 0);
-        assert_eq!(active, 0, "SECURE_FAILURE NULL: active_callbacks must balance to 0");
-        assert_eq!(flags, 0, "SECURE_FAILURE NULL: tls_failure_flags must stay 0");
-        assert!(
-            matches!(poll, Poll::Pending),
-            "SECURE_FAILURE NULL: must not signal (REQUEST_ERROR follow-up carries the error)"
-        );
     }
 
     // ---------------------------------------------------------------------
@@ -2319,7 +2493,7 @@ mod tests {
         ];
 
         for case in &cases {
-            let state = Arc::new(RequestState::new(false));
+            let state = Arc::new(RequestState::new_test());
             (case.prepare)(&state);
             if case.poison {
                 poison_close_state(&state);
@@ -2334,7 +2508,7 @@ mod tests {
         use std::sync::mpsc;
         use std::thread;
 
-        let state = Arc::new(RequestState::new(false));
+        let state = Arc::new(RequestState::new_test());
         // Simulate an in-flight callback (active=1) before any waiter starts.
         {
             let mut g = state.lock_close_state();
@@ -2360,5 +2534,469 @@ mod tests {
 
         rx.recv_timeout(Duration::from_secs(5))
             .expect("wait_closed_and_idle should return after closed=true && active=0");
+    }
+
+    // ---- cross-origin redirect header stripping ----
+
+    /// `Origin::from_url` normalization: case-insensitive scheme/host
+    /// and default-port equivalence (parse failures are handled in
+    /// `winhttp_callback_status_redirect_dispatch`).
+    #[test]
+    fn origin_from_url_normalization_cases() {
+        struct Case {
+            label: &'static str,
+            a: &'static str,
+            b: &'static str,
+            equal: bool,
+        }
+
+        let cases = [
+            Case {
+                label: "host case-insensitive",
+                a: "https://ExAmPlE.CoM/x",
+                b: "https://example.com/y",
+                equal: true,
+            },
+            Case {
+                label: "implicit :443 == explicit :443 on https",
+                a: "https://example.com/",
+                b: "https://example.com:443/",
+                equal: true,
+            },
+            Case {
+                label: "cross-host",
+                a: "https://api.example.com/",
+                b: "https://attacker.example.org/",
+                equal: false,
+            },
+            Case {
+                label: "cross-scheme on default port (https -> http)",
+                a: "https://example.com/",
+                b: "http://example.com/",
+                equal: false,
+            },
+            Case {
+                label: "cross-port",
+                a: "https://example.com/",
+                b: "https://example.com:8443/",
+                equal: false,
+            },
+        ];
+
+        for case in &cases {
+            let parse = |s: &str| -> crate::url::Url {
+                s.parse()
+                    .unwrap_or_else(|e| panic!("{}: parse {s}: {e}", case.label))
+            };
+            let oa = Origin::from_url(&parse(case.a));
+            let ob = Origin::from_url(&parse(case.b));
+            if case.equal {
+                assert_eq!(oa, ob, "{}: origins must compare equal", case.label);
+            } else {
+                assert_ne!(oa, ob, "{}: origins must compare distinct", case.label);
+            }
+        }
+    }
+
+    /// Tracked origin advances only on cross-origin hops; remove-header
+    /// stub always succeeds.
+    #[test]
+    fn cross_origin_redirect_updates_tracked_origin() {
+        struct Hop {
+            label: &'static str,
+            redirect_to: &'static str,
+            expect_origin: (&'static str, &'static str, u16),
+        }
+
+        let hops = [
+            Hop {
+                label: "same-origin path change leaves origin unchanged",
+                redirect_to: "https://api.example.com/v2/users",
+                expect_origin: ("https", "api.example.com", 443),
+            },
+            Hop {
+                label: "cross-host updates tracked origin to attacker",
+                redirect_to: "https://attacker.example.org/steal",
+                expect_origin: ("https", "attacker.example.org", 443),
+            },
+            Hop {
+                label: "further same-origin hop on new origin leaves it unchanged",
+                redirect_to: "https://attacker.example.org/another",
+                expect_origin: ("https", "attacker.example.org", 443),
+            },
+        ];
+
+        let state = RequestState::new(false, Origin::new("https", "api.example.com", 443));
+
+        for hop in &hops {
+            let parsed: crate::url::Url = hop
+                .redirect_to
+                .parse()
+                .unwrap_or_else(|e| panic!("test URL parse failed for {}: {e}", hop.redirect_to));
+            strip_sensitive_headers_on_cross_origin_redirect_with(
+                std::ptr::null_mut(),
+                &state,
+                &parsed,
+                |_handle, _name| Ok(()),
+            );
+            let want = Origin::new(hop.expect_origin.0, hop.expect_origin.1, hop.expect_origin.2);
+            assert_eq!(*state.current_origin.lock().unwrap(), want, "{}", hop.label,);
+            assert!(
+                !lock_or_clear(&state.callback_abort).is_aborted(),
+                "{}: must not abort on the success path",
+                hop.label,
+            );
+        }
+    }
+
+    /// Strip failure on a cross-origin hop must abort -- otherwise
+    /// WinHTTP would forward surviving sensitive headers.  Driven over
+    /// first/middle/last header in `SENSITIVE_HEADERS_ON_CROSS_ORIGIN`
+    /// so all loop-exit points are pinned.
+    #[test]
+    fn cross_origin_redirect_aborts_on_strip_failure() {
+        struct Case {
+            label: &'static str,
+            fail_on: &'static str,
+        }
+
+        let cases = [
+            Case {
+                label: "first header fails",
+                fail_on: "Authorization",
+            },
+            Case {
+                label: "middle header fails",
+                fail_on: "Cookie2",
+            },
+            Case {
+                label: "last header fails",
+                fail_on: "WWW-Authenticate",
+            },
+        ];
+
+        for case in &cases {
+            let state = RequestState::new(false, Origin::new("https", "api.example.com", 443));
+            let initial = state.current_origin.lock().unwrap().clone();
+            let target: crate::url::Url = "https://attacker.example.org/steal".parse().unwrap();
+            let fail_on = case.fail_on;
+
+            strip_sensitive_headers_on_cross_origin_redirect_with(
+                std::ptr::null_mut(),
+                &state,
+                &target,
+                |_handle, name| {
+                    if name == fail_on {
+                        Err(Error::request("simulated WinHTTP strip failure"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+
+            let mut abort = lock_or_clear(&state.callback_abort);
+            assert!(abort.is_aborted(), "{}: strip failure must abort", case.label);
+            assert_eq!(
+                *state.current_origin.lock().unwrap(),
+                initial,
+                "{}: origin must not advance when strip fails",
+                case.label,
+            );
+            let reason = abort.take_reason().expect("abort reason must be stashed");
+            assert!(reason.is_request(), "{}: reason should be request-phase", case.label);
+            let msg = error_chain_text(&reason);
+            let needle = format!("failed to strip {fail_on}");
+            assert!(
+                msg.contains(&needle) && msg.contains("attacker.example.org"),
+                "{}: reason should mention {needle:?} + target; got: {msg}",
+                case.label,
+            );
+        }
+    }
+
+    /// `abort_from_callback` is idempotent: first caller's reason wins
+    /// regardless of how many later callers pile on.
+    #[test]
+    fn abort_from_callback_is_idempotent() {
+        struct Case {
+            label: &'static str,
+            reasons: &'static [&'static str],
+        }
+
+        let cases = [
+            Case {
+                label: "single caller",
+                reasons: &["only"],
+            },
+            Case {
+                label: "two callers",
+                reasons: &["first", "second"],
+            },
+            Case {
+                label: "three callers",
+                reasons: &["first", "second", "third"],
+            },
+        ];
+
+        for case in &cases {
+            let state = RequestState::new_test();
+            for r in case.reasons {
+                state.abort_from_callback(std::ptr::null_mut(), Error::request(*r));
+            }
+
+            let mut abort = lock_or_clear(&state.callback_abort);
+            assert!(abort.is_aborted(), "{}: must be aborted", case.label);
+            let reason = abort
+                .take_reason()
+                .unwrap_or_else(|| panic!("{}: a reason must be stashed", case.label));
+            let msg = error_chain_text(&reason);
+            let want = case.reasons[0];
+            assert!(
+                msg.contains(want),
+                "{}: first caller's reason {want:?} must win; got: {msg}",
+                case.label,
+            );
+        }
+    }
+
+    /// Join an `Error` with its `source()` chain -- `Display` only
+    /// prints the top-level kind label.
+    fn error_chain_text(err: &Error) -> String {
+        use std::error::Error as _;
+        let mut out = err.to_string();
+        let mut cur: Option<&(dyn std::error::Error + 'static)> = err.source();
+        while let Some(e) = cur {
+            out.push_str(" :: ");
+            out.push_str(&e.to_string());
+            cur = e.source();
+        }
+        out
+    }
+
+    /// `STATUS_REDIRECT` through the full `winhttp_callback` entry
+    /// point.  Covers the two outcomes that don't need a real FFI call:
+    /// same-origin (no strip, no abort) and unparsable (abort).  The
+    /// cross-origin success path is in
+    /// `cross_origin_redirect_updates_tracked_origin` -- can't run here
+    /// because the real `WinHttpAddRequestHeaders` would fail on a null
+    /// handle and trip the abort path itself.
+    #[test]
+    fn winhttp_callback_status_redirect_dispatch() {
+        struct Case {
+            label: &'static str,
+            initial: (&'static str, &'static str, u16),
+            // Null-terminated -- WinHTTP delivers a null-terminated wide string.
+            redirect_to: &'static str,
+            expect_aborted: bool,
+            expect_origin: (&'static str, &'static str, u16),
+        }
+
+        let cases = [
+            Case {
+                label: "same-origin redirect: no abort, tracker unchanged",
+                initial: ("https", "api.example.com", 443),
+                redirect_to: "https://api.example.com/v2/users\0",
+                expect_aborted: false,
+                expect_origin: ("https", "api.example.com", 443),
+            },
+            Case {
+                label: "unparsable redirect: abort, tracker unchanged",
+                initial: ("https", "api.example.com", 443),
+                redirect_to: "not a url\0",
+                expect_aborted: true,
+                expect_origin: ("https", "api.example.com", 443),
+            },
+        ];
+
+        for case in &cases {
+            let state = Arc::new(RequestState::new(
+                false,
+                Origin::new(case.initial.0, case.initial.1, case.initial.2),
+            ));
+            let ctx = CallbackContext::new(&state);
+
+            // `dwStatusInformationLength` is the BYTE length of the wide string.
+            let wide: Vec<u16> = case.redirect_to.encode_utf16().collect();
+            let byte_len = u32::try_from(wide.len() * 2).expect("byte len fits in u32");
+
+            // SAFETY: `ctx` keeps the Arc alive across the call.
+            // STATUS_REDIRECT is not HANDLE_CLOSING so the callback uses
+            // `borrow_raw` and never `drop_raw`.
+            unsafe {
+                winhttp_callback(
+                    std::ptr::null_mut(),
+                    ctx.as_raw(),
+                    WINHTTP_CALLBACK_STATUS_REDIRECT,
+                    wide.as_ptr() as *mut std::ffi::c_void,
+                    byte_len,
+                );
+            }
+
+            let want =
+                Origin::new(case.expect_origin.0, case.expect_origin.1, case.expect_origin.2);
+            assert_eq!(
+                *state.current_origin.lock().unwrap(),
+                want,
+                "{}: tracked origin",
+                case.label,
+            );
+            let mut abort = lock_or_clear(&state.callback_abort);
+            assert_eq!(
+                abort.is_aborted(),
+                case.expect_aborted,
+                "{}: callback_abort.is_aborted()",
+                case.label,
+            );
+            if case.expect_aborted {
+                // Only path that stashes a reason via STATUS_REDIRECT;
+                // assert the reason text here (the strip-layer test
+                // can't reach the unparsable case anymore).
+                let reason = abort
+                    .take_reason()
+                    .expect("expected an abort reason for the unparsable case");
+                let msg = error_chain_text(&reason);
+                assert!(
+                    msg.contains("unparsable"),
+                    "{}: abort reason should mention 'unparsable'; got: {msg}",
+                    case.label,
+                );
+            }
+            drop(abort);
+            let close = state.lock_close_state();
+            assert_eq!(close.active_callbacks, 0, "{}: active_callbacks must balance", case.label,);
+            // Null handle -> close_winhttp_handle is a no-op, so
+            // `closed` stays false even on the abort path.
+            assert!(!close.closed, "{}: STATUS_REDIRECT must not mark closed", case.label,);
+        }
+    }
+
+    /// All three `callback_error_to_error` branches (no-abort,
+    /// abort-with-reason, abort-with-consumed-reason) must attach the
+    /// URL and pick the right error source.
+    #[test]
+    fn callback_error_to_error_routing_cases() {
+        let url: Url = "https://example.com/test".parse().unwrap();
+
+        struct Case<'a> {
+            label: &'static str,
+            seed: fn() -> CallbackAbort,
+            code: u32,
+            check: &'a dyn Fn(&Error),
+        }
+
+        let cases: &[Case<'_>] = &[
+            Case {
+                label: "no abort: returns WinHTTP-coded timeout error",
+                seed: || CallbackAbort::NotAborted,
+                code: ERROR_WINHTTP_TIMEOUT,
+                check: &|err| assert!(err.is_timeout(), "expected timeout kind"),
+            },
+            Case {
+                label: "aborted with reason: surfaces stashed reason, not generic OPERATION_CANCELLED",
+                seed: || {
+                    CallbackAbort::Aborted(Some(Error::request("custom-strip-failure-marker")))
+                },
+                code: ERROR_WINHTTP_OPERATION_CANCELLED,
+                check: &|err| {
+                    let chain = error_chain_text(err);
+                    assert!(
+                        chain.contains("custom-strip-failure-marker"),
+                        "expected marker in chain; got: {chain}",
+                    );
+                    assert!(
+                        !chain.contains("12017"),
+                        "must NOT fall through to WinHTTP-coded error; got: {chain}",
+                    );
+                },
+            },
+            Case {
+                label: "aborted but reason already taken: falls through to WinHTTP-coded error",
+                seed: || CallbackAbort::Aborted(None),
+                code: ERROR_WINHTTP_OPERATION_CANCELLED,
+                check: &|err| {
+                    assert!(err.is_request(), "expected request kind");
+                    let chain = error_chain_text(err);
+                    assert!(
+                        chain.contains("12017"),
+                        "expected OPERATION_CANCELLED code (12017) in chain; got: {chain}",
+                    );
+                },
+            },
+        ];
+
+        for case in cases {
+            let state = RequestState::new_test();
+            *lock_or_clear(&state.callback_abort) = (case.seed)();
+
+            let err = callback_error_to_error(case.code, &state, &url);
+
+            assert_eq!(
+                err.url().map(|u| u.as_str()),
+                Some("https://example.com/test"),
+                "{}: URL must be preserved",
+                case.label,
+            );
+            (case.check)(&err);
+        }
+    }
+
+    /// `WinHttpRequestHandle::Drop` must return on every routing
+    /// branch; a wrong branch deadlocks on `wait_closed_and_idle`.
+    /// Drives the two null-handle branches (branch 2 needs a real
+    /// WinHTTP handle, exercised by integration tests). Each case
+    /// runs Drop on a worker thread with a 5s timeout.
+    #[test]
+    fn winhttp_request_handle_drop_routing_cases() {
+        use std::sync::mpsc;
+
+        struct Case {
+            label: &'static str,
+            seed_abort: bool,
+            seed_closed: bool,
+        }
+
+        let cases = &[
+            Case {
+                label: "aborted: skip second close, wait returns because HANDLE_CLOSING pre-seeded",
+                seed_abort: true,
+                seed_closed: true,
+            },
+            Case {
+                label: "not aborted, null handle: close returns false, Drop returns without wait",
+                seed_abort: false,
+                seed_closed: false,
+            },
+        ];
+
+        for case in cases {
+            let state = Arc::new(RequestState::new_test());
+            if case.seed_abort {
+                state.abort_from_callback(
+                    std::ptr::null_mut(),
+                    Error::request("simulated callback abort"),
+                );
+            }
+            if case.seed_closed {
+                state.mark_final_callback_seen();
+            }
+
+            let handle = WinHttpRequestHandle {
+                handle: std::ptr::null_mut(),
+                state: Arc::clone(&state),
+            };
+
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                drop(handle);
+                let _ = tx.send(());
+            });
+            rx.recv_timeout(Duration::from_secs(5)).unwrap_or_else(|_| {
+                panic!(
+                    "{}: Drop did not return within 5s -- likely a wrong routing branch \
+                     leading to a deadlock on wait_closed_and_idle",
+                    case.label,
+                );
+            });
+        }
     }
 }

@@ -59,6 +59,11 @@ pub(crate) struct ClientInner {
     pub accept_invalid_certs: bool,
     /// Whether to restrict requests to HTTPS-only.
     pub https_only: bool,
+    /// Whether the configured redirect policy allows following redirects
+    /// at all (true unless the caller set `Policy::none()`). Used to
+    /// translate WinHTTP's silent surfacing of a blocked https→http
+    /// redirect into a redirect-policy `Err`, matching reqwest.
+    pub redirect_follows: bool,
     /// Retry policy for automatically retrying failed requests.
     pub retry_policy: retry::Policy,
 }
@@ -310,8 +315,37 @@ impl Client {
             send_future.await?
         };
 
+        // WinHTTP's default `WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP`
+        // blocks https->http redirects by surfacing the 3xx silently. Translate
+        // that into a redirect-policy `Err` so callers see the same shape as
+        // reqwest (where the redirect machinery raises an error). Skipped when
+        // the caller opted out of redirect following entirely.
+        if inner.redirect_follows
+            && let Some(err) = translate_blocked_https_downgrade(&raw)
+        {
+            return Err(err);
+        }
+
         Ok(Response::from_raw(raw, deadline, self.clone()))
     }
+}
+
+/// If `raw` is an https response whose `Location` header points at an
+/// `http://` URL, build a redirect-policy `Err` describing the scheme
+/// downgrade. Returns `None` otherwise.
+fn translate_blocked_https_downgrade(raw: &winhttp::RawResponse) -> Option<Error> {
+    if !raw.status.is_redirection() || !raw.url.is_https {
+        return None;
+    }
+    let location = raw.headers.get(http::header::LOCATION)?.to_str().ok()?;
+    let target = raw.url.join(location).ok()?;
+    if target.is_https {
+        return None;
+    }
+    Some(
+        Error::redirect("https->http redirect blocked by redirect policy")
+            .with_url(raw.url.clone()),
+    )
 }
 
 #[cfg(feature = "panicking-compat")]
@@ -985,6 +1019,11 @@ impl ClientBuilder {
         let send_timeout_ms = self.send_timeout.map_or(0, to_ms);
         let read_timeout_ms = self.read_timeout.map_or(0, to_ms);
 
+        let redirect_follows = !matches!(
+            self.redirect_policy.as_ref().map(|p| &p.inner),
+            Some(redirect::PolicyInner::None)
+        );
+
         let config = SessionConfig {
             user_agent: self.user_agent,
             connect_timeout_ms,
@@ -1017,6 +1056,7 @@ impl ClientBuilder {
                 default_headers: self.default_headers,
                 accept_invalid_certs: self.tls_danger_accept_invalid_certs,
                 https_only: self.https_only,
+                redirect_follows,
                 retry_policy: self
                     .retry_policy
                     .unwrap_or_else(retry::Builder::default)

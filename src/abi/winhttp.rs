@@ -385,6 +385,33 @@ pub(crate) fn winhttp_add_request_header(
     }
 }
 
+/// Remove a single request header by name.
+///
+/// Calls `WinHttpAddRequestHeaders` with `"<Name>:"` (empty value) and
+/// `WINHTTP_ADDREQ_FLAG_REPLACE` only -- per MS docs, REPLACE with an
+/// empty value removes the header if present. `ERROR_WINHTTP_HEADER_NOT_FOUND`
+/// is treated as success (the header was already absent).
+pub(crate) fn winhttp_remove_request_header(
+    handle: RawWinHttpHandle,
+    name: &str,
+) -> Result<(), Error> {
+    let header_line = format!("{name}:");
+    let wide: Vec<u16> = header_line.encode_utf16().collect();
+    let wide_len = u32::try_from(wide.len())
+        .map_err(|_| Error::request(format!("header name too long ({} chars)", wide.len())))?;
+    let ok = unsafe {
+        WinHttpAddRequestHeaders(handle, wide.as_ptr(), wide_len, WINHTTP_ADDREQ_FLAG_REPLACE)
+    };
+    if ok != 0 {
+        return Ok(());
+    }
+    let code = unsafe { GetLastError() };
+    if code == ERROR_WINHTTP_HEADER_NOT_FOUND {
+        return Ok(());
+    }
+    Err(Error::from_win32(code))
+}
+
 /// `WinHttpSetCredentials` -- set proxy Basic-auth credentials.
 pub(crate) fn winhttp_set_proxy_credentials(
     handle: RawWinHttpHandle,
@@ -513,8 +540,8 @@ pub(crate) fn winhttp_crack_url(url: &str) -> Result<CrackedUrl, Error> {
             wide.as_ptr(),
             wide_len,
             // No flags -- preserve percent-encoding as-is.
-            // ICU_ESCAPE would double-encode: %3d → %253d.
-            // ICU_DECODE would decode: %3d → =.
+            // ICU_ESCAPE would double-encode: %3d -> %253d.
+            // ICU_DECODE would decode: %3d -> =.
             // Neither is correct for URLs which are already encoded.
             0,
             &mut components,

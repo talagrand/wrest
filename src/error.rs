@@ -247,6 +247,11 @@ impl Error {
     pub(crate) fn request(source: impl Into<BoxError>) -> Self {
         Self::with_kind(ErrorKind::Request, source)
     }
+
+    /// Create a redirect-policy error.
+    pub(crate) fn redirect(source: impl Into<BoxError>) -> Self {
+        Self::with_kind(ErrorKind::Redirect, source)
+    }
 }
 
 impl fmt::Display for Error {

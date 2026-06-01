@@ -13,6 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - 32-bit soundness: Return failure instead of silently truncating oversized inputs.
 - Retry budget: the slot-advance loop is now capped at the bucket count, so a long suspend (sleep, debugger, etc.) can no longer cause huge numbers of zero-bucket iterations on the next request.
 - DLL-host safety: closed path where a panic during `HANDLE_CLOSING` callback bookkeeping could be swallowed and leave `WinHttpRequestHandle::drop` hanging in `wait_closed_and_idle`.
+- Cross-origin redirects no longer forward `Authorization`, `Cookie`, `Cookie2`, `Proxy-Authorization`, `Proxy-Authenticate`, or `WWW-Authenticate` headers to the new origin. WinHTTP forwards these unchanged by default and documents that stripping them is the application's responsibility (Security Considerations item 16).
+- An `https://` -> `http://` redirect now returns `Error::is_redirect() == true` instead of silently surfacing the 3xx response. The Err shape matches what reqwest produces under `https_only(true)`, but wrest applies it unconditionally: WinHTTP defaults to blocking the downgrade and wrest preserves that default, so the new shape is always what callers see (reqwest's default *follows* https->http silently).
 
 ### Changed
 - CI - Reliability: swap `httpbin.org` for a locally-hosted version for reliability (doesn't affect local testing)
