@@ -847,24 +847,67 @@ fn hex_nibble(b: u8) -> Option<u8> {
         .and_then(|d| u8::try_from(d).ok())
 }
 
+/// Classification of a path segment for RFC 3986 §5.2.4 dot-segment
+/// removal.  `%2e` / `%2E` count as dots, per §6.2.2.2 (percent-encoded
+/// unreserved characters normalize to their literal form).
+enum DotClass {
+    /// `.`, `%2e`, or `%2E`
+    Dot,
+    /// `..`, `.%2e`, `%2e.`, `%2e%2e`, `%2e%2E`, `%2E%2e`, `%2E%2E`
+    DotDot,
+    /// Anything else.
+    Other,
+}
+
+/// Consume one leading "dot token" -- literal `.` or `%2e` / `%2E` --
+/// returning the remainder, or `None` if the segment doesn't start with one.
+fn strip_dot_token(s: &str) -> Option<&str> {
+    s.strip_prefix('.')
+        .or_else(|| s.strip_prefix("%2e"))
+        .or_else(|| s.strip_prefix("%2E"))
+}
+
+fn classify_segment(segment: &str) -> DotClass {
+    // RFC 3986 §5.2.4 only cares about segments of exactly 1 or 2
+    // dot-tokens. Try to consume one; bail if the segment doesn't start
+    // with a dot-token at all.
+    let Some(after_one) = strip_dot_token(segment) else {
+        return DotClass::Other;
+    };
+    if after_one.is_empty() {
+        return DotClass::Dot;
+    }
+    let Some(after_two) = strip_dot_token(after_one) else {
+        return DotClass::Other;
+    };
+    if after_two.is_empty() {
+        return DotClass::DotDot;
+    }
+    DotClass::Other
+}
+
 /// Remove dot-segments from a path per RFC 3986 §5.2.4.
 ///
-/// Collapses `.` (current directory) and `..` (parent directory) segments,
-/// producing a normalized absolute path.
+/// Recognises percent-encoded dots (`%2e` / `%2E`) as `.` per RFC 3986
+/// §6.2.2.2 -- without this, an attacker-controlled relative reference
+/// `%2e%2e/secret` joined against a trusted base would escape the base
+/// path. Note that `%2f` (encoded slash) is **not** decoded; per RFC 3986
+/// it is a literal slash inside a single segment, not a separator --
+/// matching WinHTTP's wire-level treatment.
 fn remove_dot_segments(path: &str) -> String {
     let mut output: Vec<&str> = Vec::new();
+    let mut last_was_dot = false;
 
     for segment in path.split('/') {
-        match segment {
-            "." => {
-                // Current directory -- skip
-            }
-            ".." => {
-                // Parent directory -- pop the last segment (if any)
+        match classify_segment(segment) {
+            DotClass::Dot => last_was_dot = true,
+            DotClass::DotDot => {
                 output.pop();
+                last_was_dot = true;
             }
-            s => {
-                output.push(s);
+            DotClass::Other => {
+                output.push(segment);
+                last_was_dot = false;
             }
         }
     }
@@ -876,8 +919,9 @@ fn remove_dot_segments(path: &str) -> String {
         result.insert(0, '/');
     }
 
-    // Preserve trailing slash when input ended with /. or /..
-    if (path.ends_with("/.") || path.ends_with("/..")) && !result.ends_with('/') {
+    // Preserve trailing slash when the input's final segment was a dot
+    // (literal or percent-encoded): `/foo/.`, `/foo/..`, `/foo/%2e`, etc.
+    if last_was_dot && !result.ends_with('/') {
         result.push('/');
     }
 
@@ -1277,6 +1321,76 @@ mod tests {
         // -- Trailing dot/dotdot --
         ("https://example.com/a/b/c", ".", "https://example.com/a/b/", "trailing dot"),
         ("https://example.com/a/b/c", "..", "https://example.com/a/", "trailing dotdot"),
+        // -- Percent-encoded dot-segments (RFC 3986 §5.2.4 + §6.2.2.2) --
+        // `%2e` / `%2E` are dot-equivalent for segment classification.
+        // `%2f` (encoded slash) is NOT a separator -- it stays inside
+        // whatever segment it appears in (matching WinHTTP wire behavior).
+        (
+            "https://example.com/base/a/b/",
+            "%2e%2e/secret",
+            "https://example.com/base/a/secret",
+            "percent-encoded ../ traversal",
+        ),
+        (
+            "https://example.com/base/",
+            "%2e%2e%2fsecret",
+            "https://example.com/base/%2e%2e%2fsecret",
+            "%2f stays encoded -- not a separator (single opaque segment)",
+        ),
+        (
+            "https://example.com/a/b/c",
+            "%2E%2E/d",
+            "https://example.com/a/d",
+            "uppercase %2E%2E as ..",
+        ),
+        (
+            "https://example.com/a/b/c",
+            "a/%2e/b",
+            "https://example.com/a/b/a/b",
+            "%2e as . in middle",
+        ),
+        (
+            "https://example.com/a/b/c",
+            "%2e%2E/d",
+            "https://example.com/a/d",
+            "mixed-case %2e%2E as ..",
+        ),
+        (
+            "https://example.com/a/b/c",
+            ".%2e/d",
+            "https://example.com/a/d",
+            "mixed literal+encoded .%2e as ..",
+        ),
+        (
+            "https://example.com/a/b/c",
+            "%2e./d",
+            "https://example.com/a/d",
+            "mixed encoded+literal %2e. as ..",
+        ),
+        (
+            "https://example.com/a/b/c",
+            "%2ex",
+            "https://example.com/a/b/%2ex",
+            "%2ex is not a dot-segment",
+        ),
+        (
+            "https://example.com/a/b/c",
+            "%2e%2e%2e/d",
+            "https://example.com/a/b/%2e%2e%2e/d",
+            "%2e%2e%2e (three dots) is not a dot-segment",
+        ),
+        (
+            "https://example.com/a/b/c",
+            "%2e",
+            "https://example.com/a/b/",
+            "trailing %2e preserves trailing slash",
+        ),
+        (
+            "https://example.com/a/b/c",
+            "%2e%2e",
+            "https://example.com/a/",
+            "trailing %2e%2e preserves trailing slash",
+        ),
         // -- Empty input → returns base URL --
         (
             "https://example.com/a/b?q=1#f",

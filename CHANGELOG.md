@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - DLL-host safety: closed path where a panic during `HANDLE_CLOSING` callback bookkeeping could be swallowed and leave `WinHttpRequestHandle::drop` hanging in `wait_closed_and_idle`.
 - Cross-origin redirects no longer forward `Authorization`, `Cookie`, `Cookie2`, `Proxy-Authorization`, `Proxy-Authenticate`, or `WWW-Authenticate` headers to the new origin. WinHTTP forwards these unchanged by default and documents that stripping them is the application's responsibility (Security Considerations item 16).
 - An `https://` -> `http://` redirect now returns `Error::is_redirect() == true` instead of silently surfacing the 3xx response. The Err shape matches what reqwest produces under `https_only(true)`, but wrest applies it unconditionally: WinHTTP defaults to blocking the downgrade and wrest preserves that default, so the new shape is always what callers see (reqwest's default *follows* https->http silently).
+- URL path traversal: `Url::join()` now treats `%2e` / `%2E` as `.` when collapsing dot-segments, so an attacker-controlled relative reference like `%2e%2e/secret` can no longer escape a trusted base.
 
 ### Changed
 - CI - Reliability: swap `httpbin.org` for a locally-hosted version for reliability (doesn't affect local testing)

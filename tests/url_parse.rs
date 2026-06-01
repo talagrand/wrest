@@ -186,7 +186,12 @@ fn is_rfc_clean_input(input: &str) -> bool {
             return false;
         }
     }
-    // Dot-segments and %2e-as-dot trigger WHATWG-specific resolution.
+    // Dot-segments trigger WHATWG-specific resolution at parse time.
+    // wrest does not normalize at parse time at all — CrackUrl is the
+    // source of truth and preserves paths verbatim. Dot-segment removal
+    // happens only inside `Url::join()` (per RFC 3986 §5.2.4, which scopes
+    // it to relative reference resolution), so any `%2e` / `%2E` in the
+    // input would differ from WHATWG's normalized-at-parse expectation.
     if input.contains("/./")
         || input.contains("/../")
         || input.ends_with("/.")
