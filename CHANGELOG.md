@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to Semantic Versioning.
 
+## Unreleased
+
+### Changed
+- CI - Build performance: enable `sccache` with the GitHub Actions cache backend  to share cross-matrix `rustc` artifacts; fix `go` caching as well.
+
 ## 0.5.7
 
 ### Fixed
