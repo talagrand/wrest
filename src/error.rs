@@ -404,6 +404,12 @@ mod tests {
                 "error trying to connect for url (https://example.com/)",
             ),
             (
+                "userinfo_url_stripped",
+                Error::request("boom")
+                    .with_url("https://alice:s3cret@example.com/x".into_url().unwrap()),
+                "error sending request for url (https://example.com/x)",
+            ),
+            (
                 "timeout_no_url",
                 Error {
                     inner: Box::new(InnerError {
@@ -463,6 +469,58 @@ mod tests {
 
         for (label, err, expected) in &cases {
             assert_eq!(err.to_string(), *expected, "error display: {label}");
+        }
+    }
+
+    #[test]
+    fn error_debug_format() {
+        // Sibling of `error_display_format` for the `Debug` impl.
+        // Exact-match on Debug is brittle (Box<dyn Error> source
+        // formatters vary), so each case asserts substrings that must
+        // appear and substrings that must NOT appear. The redaction
+        // case is the security-critical one: passwords from URL
+        // userinfo must reach `Url::Debug` through `Redacted<T>` and
+        // emerge as `"<redacted>"`.
+        type TestCase<'a> = (&'a str, Error, &'a [&'a str], &'a [&'a str]);
+        let cases: Vec<TestCase<'_>> = vec![
+            (
+                "url_password_redacted",
+                Error::request("boom")
+                    .with_url("https://alice:s3cret@example.com/x".into_url().unwrap()),
+                &["Error {", "kind: Request", "<redacted>", "alice"],
+                &["s3cret"],
+            ),
+            (
+                "no_url_no_status",
+                Error::request("oops"),
+                &["kind: Request", "url: None", "status: None", "source: Some("],
+                &[],
+            ),
+            (
+                "with_status",
+                Error::status_error(
+                    StatusCode::IM_A_TEAPOT,
+                    "https://example.com/brew".into_url().unwrap(),
+                ),
+                &["kind: Status", "status: Some(", "source: None"],
+                &[],
+            ),
+        ];
+
+        for (label, err, must_contain, must_not_contain) in &cases {
+            let debug = format!("{err:?}");
+            for needle in *must_contain {
+                assert!(
+                    debug.contains(needle),
+                    "{label}: expected substring {needle:?} in {debug}"
+                );
+            }
+            for forbidden in *must_not_contain {
+                assert!(
+                    !debug.contains(forbidden),
+                    "{label}: leaked forbidden substring {forbidden:?} in {debug}"
+                );
+            }
         }
     }
 

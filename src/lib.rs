@@ -34,6 +34,8 @@ mod error;
 /// Proxy configuration types.
 #[cfg(native_winhttp)]
 pub mod proxy;
+#[cfg(native_winhttp)]
+pub(crate) mod redact;
 /// Redirect policy configuration.
 #[cfg(native_winhttp)]
 pub mod redirect;
