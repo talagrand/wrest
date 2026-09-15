@@ -144,7 +144,10 @@ static ICU: OnceLock<Option<IcuFunctions>> = OnceLock::new();
 ///
 /// Called exactly once via [`OnceLock`].  Returns `None` if any step fails.
 fn load_icu() -> Option<IcuFunctions> {
-    use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+    use windows_sys::Win32::{
+        Foundation::FreeLibrary,
+        System::LibraryLoader::{LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW},
+    };
 
     // "icu.dll\0" as null-terminated UTF-16.
     let dll_name: [u16; 8] = [
@@ -157,7 +160,9 @@ fn load_icu() -> Option<IcuFunctions> {
         b'l' as u16,
         0,
     ];
-    let h = unsafe { LoadLibraryW(dll_name.as_ptr()) };
+    let h = unsafe {
+        LoadLibraryExW(dll_name.as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32)
+    };
     if h.is_null() {
         return None;
     }
@@ -165,9 +170,16 @@ fn load_icu() -> Option<IcuFunctions> {
     // Resolve each function by name.  Microsoft's `icu.dll` exports
     // unversioned symbols (e.g. `ucnv_open`, not `ucnv_open_72`),
     // and appcompat policy guarantees these names are stable.
-    let open = get_proc(h, b"ucnv_open\0")?;
-    let to_u_chars = get_proc(h, b"ucnv_toUChars\0")?;
-    let close = get_proc(h, b"ucnv_close\0")?;
+    let (Some(open), Some(to_u_chars), Some(close)) = (
+        get_proc(h, b"ucnv_open\0"),
+        get_proc(h, b"ucnv_toUChars\0"),
+        get_proc(h, b"ucnv_close\0"),
+    ) else {
+        unsafe {
+            FreeLibrary(h);
+        }
+        return None;
+    };
 
     // SAFETY: fn-ptr-to-fn-ptr transmute (always layout-compatible); destination
     // signatures match ICU's `extern "C"` exports.
