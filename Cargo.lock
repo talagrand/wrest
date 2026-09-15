@@ -2229,6 +2229,7 @@ dependencies = [
  "futures-timer",
  "futures-util",
  "http",
+ "mime",
  "reqwest",
  "serde",
  "serde_json",

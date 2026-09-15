@@ -211,6 +211,7 @@ futures-channel = "0.3.31"
 futures-util = "0.3.31"
 futures-executor = "0.3.31"
 base64 = "0.23"
+mime = "0.3.16"
 
 # On non-Windows platforms, reqwest is used as the HTTP passthrough.
 [target.'cfg(not(windows))'.dependencies]
@@ -245,4 +246,3 @@ doc-scrape-examples = true
 [[example]]
 name = "whirl"
 doc-scrape-examples = true
-

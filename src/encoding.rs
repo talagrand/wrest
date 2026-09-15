@@ -68,7 +68,7 @@ use crate::{Error, abi, util::string_from_utf16};
 ///
 /// * **UTF-8** labels take a fast, pure-Rust path (`String::from_utf8` /
 ///   `from_utf8_lossy`), never calling into Win32.
-/// * Unknown labels silently fall back to UTF-8 (matching reqwest behaviour).
+/// * Unknown labels silently fall back to UTF-8.
 /// * The `replacement` encoding (used by the spec to error-out certain
 ///   legacy labels) returns `U+FFFD` for any input.
 pub(crate) fn decode_body(data: &[u8], charset: &str) -> Result<String, Error> {
@@ -439,34 +439,18 @@ fn decode_utf16be(data: &[u8]) -> Result<String, Error> {
 /// ```text
 /// text/html; charset=utf-8       -> Some("utf-8")
 /// application/json               -> None
-/// text/html; charset="UTF-8"     -> Some("UTF-8")
+/// text/html; charset="UTF-8"     -> Some("utf-8")
 /// ```
 pub(crate) fn extract_charset_from_content_type(headers: &http::HeaderMap) -> Option<String> {
-    let ct = headers.get(http::header::CONTENT_TYPE)?;
-    let ct_str = ct.to_str().ok()?;
-    // Split on ';' and search each parameter for `charset=…`.
-    // Skipping the media-type segment avoids false positives from
-    // substrings embedded in unrelated parameter values
-    // (e.g. `x=charset=wrong; charset=right`).
-    for param in ct_str.split(';').skip(1) {
-        let trimmed = param.trim();
-        let Some((key, value)) = trimmed.split_once('=') else {
-            continue;
-        };
-        if !key.trim().eq_ignore_ascii_case("charset") {
-            continue;
-        }
-        let value = value.trim_start_matches('"');
-        let charset: String = value
-            .chars()
-            .take_while(|&c| c != '"' && c != ';' && !c.is_ascii_whitespace())
-            .collect();
-        if charset.is_empty() {
-            return None;
-        }
-        return Some(charset);
-    }
-    None
+    headers
+        .get(http::header::CONTENT_TYPE)?
+        .to_str()
+        .ok()?
+        .parse::<mime::Mime>()
+        .ok()?
+        .get_param("charset")
+        .map(|value| value.as_ref().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 // ---------------------------------------------------------------------------
@@ -714,26 +698,26 @@ mod tests {
     fn extract_charset_table() {
         let cases: &[(&str, Option<&str>, &str)] = &[
             ("text/html; charset=utf-8", Some("utf-8"), "plain charset"),
-            ("text/html; charset=\"UTF-8\"", Some("UTF-8"), "quoted charset"),
+            ("text/html; charset=\"UTF-8\"", Some("utf-8"), "quoted charset"),
             ("application/json", None, "no charset param"),
-            // Empty charset= value → None
+            // An empty label uses the caller-provided default encoding.
             ("text/html; charset=", None, "empty charset value"),
-            // Empty quoted charset= value → None
+            // An empty quoted value makes the media type invalid.
             ("text/html; charset=\"\"", None, "empty quoted charset value"),
-            // Substring "charset=" inside another parameter's
-            // value must not be treated as the charset parameter.
+            // Malformed MIME is ignored as a whole.
+            ("text/html; x=charset=wrong; charset=right", None, "invalid parameter value"),
             (
-                "text/html; x=charset=wrong; charset=right",
-                Some("right"),
-                "charset substring in other param value",
+                "text/plain; note=\"x;charset=windows-1252\"; charset=utf-8",
+                Some("utf-8"),
+                "semicolon inside quoted parameter",
             ),
             // charset= as part of a longer parameter name must not match
             ("text/html; notcharset=oops", None, "charset prefix in param name"),
             // Case-insensitive parameter name
-            ("text/html; Charset=Latin1", Some("Latin1"), "uppercase Charset"),
-            ("text/html; CHARSET=Big5", Some("Big5"), "all-caps CHARSET"),
-            // Parameter without '=' is skipped (covers the `else { continue }` branch).
-            ("text/html; boundary; charset=UTF-8", Some("UTF-8"), "param without equals sign"),
+            ("text/html; Charset=Latin1", Some("latin1"), "uppercase Charset"),
+            ("text/html; CHARSET=Big5", Some("big5"), "all-caps CHARSET"),
+            // Malformed MIME is ignored as a whole.
+            ("text/html; boundary; charset=UTF-8", None, "param without equals sign"),
         ];
 
         for &(content_type, expected, desc) in cases {
