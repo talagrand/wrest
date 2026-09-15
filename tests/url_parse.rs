@@ -20,7 +20,14 @@
 
 use wrest::Url;
 
-const URLTESTDATA_URL: &str = "https://raw.githubusercontent.com/web-platform-tests/wpt/refs/heads/master/url/resources/urltestdata.json";
+// Pin the corpus so upstream expectation changes cannot break CI without a code change.
+// This is the last revision before WPT b63305b changed `xn--` A-label
+// expectations, which affect reqwest itself.
+const URLTESTDATA_URL: &str = concat!(
+    "https://raw.githubusercontent.com/web-platform-tests/wpt/",
+    "f28876b96acf16e0408b9cce4bd3b40a729375d4",
+    "/url/resources/urltestdata.json"
+);
 
 /// Fetch the WHATWG `urltestdata.json` from GitHub and run every applicable
 /// test case against `wrest::Url::parse`.
