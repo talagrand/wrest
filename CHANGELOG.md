@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Fixed
 - DLL load: load system icu.dll from system32 to prevent dll planting.
+- HTTP Timeouts: keep explicit zero and positive sub-millisecond phase timeouts finite by clamping/rounding to 1ms.
 
 ### Changed
 - CI - Supply chain: SHA-pin all external actions in CI.

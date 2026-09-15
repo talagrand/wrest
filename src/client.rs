@@ -90,6 +90,15 @@ pub struct ClientBuilder {
     retry_policy: Option<retry::Builder>,
 }
 
+/// Convert an explicit duration to WinHTTP's nearest finite millisecond timeout.
+///
+/// WinHTTP reserves zero for infinity, so explicit zero and positive
+/// sub-millisecond durations use its shortest finite timeout.
+fn winhttp_timeout_ms(duration: Duration) -> i32 {
+    let millis = duration.as_nanos().div_ceil(1_000_000).max(1);
+    i32::try_from(millis).unwrap_or(i32::MAX)
+}
+
 impl Client {
     /// Create a new `Client` with default settings.
     ///
@@ -403,6 +412,8 @@ impl ClientBuilder {
     /// Send/receive stall timeouts default to infinite (matching
     /// reqwest); see [`send_timeout()`](Self::send_timeout) and
     /// [`read_timeout()`](Self::read_timeout).
+    ///
+    /// A zero duration expires before the first request attempt.
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
@@ -419,6 +430,9 @@ impl ClientBuilder {
     /// Default: **60 seconds** (WinHTTP's built-in default).  reqwest
     /// defaults to **no connect timeout** (`None`).  For end-to-end
     /// control use [`timeout()`](Self::timeout) instead.
+    ///
+    /// WinHTTP represents phase timeouts in whole milliseconds, so zero and
+    /// positive sub-millisecond durations use its shortest finite timeout (1 ms).
     #[must_use]
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect_timeout = Some(timeout);
@@ -439,6 +453,9 @@ impl ClientBuilder {
     ///
     /// Default: **no timeout** (infinite), matching hyper/tokio behaviour.
     /// For end-to-end control use [`timeout()`](Self::timeout) instead.
+    ///
+    /// WinHTTP represents phase timeouts in whole milliseconds, so zero and
+    /// positive sub-millisecond durations use its shortest finite timeout (1 ms).
     #[must_use]
     pub fn send_timeout(mut self, timeout: Duration) -> Self {
         self.send_timeout = Some(timeout);
@@ -459,6 +476,9 @@ impl ClientBuilder {
     ///
     /// Default: **no timeout** (infinite), matching hyper/tokio behaviour.
     /// For end-to-end control use [`timeout()`](Self::timeout) instead.
+    ///
+    /// WinHTTP represents phase timeouts in whole milliseconds, so zero and
+    /// positive sub-millisecond durations use its shortest finite timeout (1 ms).
     #[must_use]
     pub fn read_timeout(mut self, timeout: Duration) -> Self {
         self.read_timeout = Some(timeout);
@@ -1003,12 +1023,7 @@ impl ClientBuilder {
                 proxy::ProxyAction::Automatic
             };
 
-        // Saturate to i32::MAX rather than silently truncating.
-        // WinHttpSetTimeouts takes i32 milliseconds (~24.8 days); any
-        // Duration longer than that is effectively infinite.
-        let to_ms =
-            |d: std::time::Duration| -> i32 { i32::try_from(d.as_millis()).unwrap_or(i32::MAX) };
-        let connect_timeout_ms = self.connect_timeout.map_or(60_000, to_ms); // 60s default
+        let connect_timeout_ms = self.connect_timeout.map_or(60_000, winhttp_timeout_ms); // 60s default
 
         // send/receive stall timeouts -- default 0 (infinite, no stall
         // detection) to match hyper/tokio behaviour where reqwest has no
@@ -1016,8 +1031,8 @@ impl ClientBuilder {
         // detection via the send_timeout() / read_timeout() extensions.
         // Total end-to-end timeout is enforced separately via
         // crate::timer::Delay (built on the Win32 threadpool).
-        let send_timeout_ms = self.send_timeout.map_or(0, to_ms);
-        let read_timeout_ms = self.read_timeout.map_or(0, to_ms);
+        let send_timeout_ms = self.send_timeout.map_or(0, winhttp_timeout_ms);
+        let read_timeout_ms = self.read_timeout.map_or(0, winhttp_timeout_ms);
 
         let redirect_follows = !matches!(
             self.redirect_policy.as_ref().map(|p| &p.inner),
@@ -1087,6 +1102,22 @@ mod tests {
             builder.user_agent.is_empty(),
             "default user-agent should be empty (matching reqwest)"
         );
+    }
+
+    #[test]
+    fn winhttp_timeout_conversion_is_finite_and_rounds_up() {
+        let cases = [
+            (Duration::ZERO, 1),
+            (Duration::from_nanos(1), 1),
+            (Duration::from_micros(999), 1),
+            (Duration::from_millis(1), 1),
+            (Duration::from_micros(1_001), 2),
+            (Duration::MAX, i32::MAX),
+        ];
+
+        for (duration, expected) in cases {
+            assert_eq!(winhttp_timeout_ms(duration), expected, "{duration:?}");
+        }
     }
 
     #[test]
