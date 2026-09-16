@@ -10,28 +10,11 @@ use crate::{Error, error::ContextError};
 // Wide-string helpers
 // ---------------------------------------------------------------------------
 
-/// Convert a wide-string pointer + length (in `u16` elements) to a Rust
-/// `String`.
-///
-/// Uses [`String::from_utf16`] instead of lossy conversion so that invalid
-/// UTF-16 (unpaired surrogates) is surfaced as an error rather than silently
-/// replaced with U+FFFD.  In practice WinHTTP only produces well-formed
-/// UTF-16 for HTTP(S) URLs, so this path is defensive.
-pub(crate) fn wide_to_string(ptr: *const u16, len: u32) -> Result<String, Error> {
-    if len == 0 || ptr.is_null() {
-        return Ok(String::new());
-    }
-    let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-    String::from_utf16(slice)
-        .map_err(|_| Error::builder("WinHTTP returned invalid UTF-16 in URL component"))
-}
-
 /// Read a null-terminated wide string from a raw pointer + byte length.
 ///
-/// Unlike [`wide_to_string`] this accepts a byte count (not a `u16` count)
-/// and uses lossy conversion -- appropriate for WinHTTP callback info buffers
-/// where byte length is the convention and partial data is acceptable for
-/// diagnostic logging.
+/// This accepts a byte count (not a `u16` count) and uses lossy conversion --
+/// appropriate for WinHTTP callback info buffers where byte length is the
+/// convention and partial data is acceptable for diagnostic logging.
 ///
 /// # Safety
 ///
@@ -139,33 +122,6 @@ pub(crate) fn narrow_latin1(s: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // -- wide_to_string --
-
-    #[test]
-    fn wide_to_string_ok_cases() {
-        // (label, data, len, expected)
-        let hello: [u16; 5] = [b'H' as u16, b'e' as u16, b'l' as u16, b'l' as u16, b'o' as u16];
-
-        let cases: &[(&str, *const u16, u32, &str)] = &[
-            ("null_ptr", std::ptr::null(), 10, ""),
-            ("zero_len", hello.as_ptr(), 0, ""),
-            ("valid_utf16", hello.as_ptr(), 5, "Hello"),
-        ];
-
-        for &(label, ptr, len, expected) in cases {
-            let result = wide_to_string(ptr, len).expect(label);
-            assert_eq!(result, expected, "wide_to_string {label}");
-        }
-    }
-
-    #[test]
-    fn wide_to_string_unpaired_surrogate() {
-        // 0xD800 is a high surrogate without a low surrogate -- invalid UTF-16.
-        let data: [u16; 1] = [0xD800];
-        let result = wide_to_string(data.as_ptr(), 1);
-        assert!(result.is_err(), "unpaired surrogate should be an error");
-    }
 
     // -- wide_to_string_lossy --
 

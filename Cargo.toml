@@ -211,8 +211,10 @@ futures-channel = "0.3.31"
 futures-util = "0.3.31"
 futures-executor = "0.3.31"
 base64 = "0.23"
+fluent-uri = { version = "0.4.1", features = ["net"] }
 mime = "0.3.16"
 scopeguard = { version = "1", default-features = false }
+percent-encoding = "2.3"
 
 # On non-Windows platforms, reqwest is used as the HTTP passthrough.
 [target.'cfg(not(windows))'.dependencies]

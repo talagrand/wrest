@@ -378,8 +378,8 @@ impl RequestBuilder {
 
         if let Ok(ref mut url) = self.url {
             let new_query = match &url.query {
-                Some(existing) => format!("{existing}&{query_str}"),
-                None => query_str,
+                Some(existing) if !existing.is_empty() => format!("{existing}&{query_str}"),
+                Some(_) | None => query_str,
             };
             url.set_query_string(new_query);
         }
@@ -808,6 +808,18 @@ mod tests {
         let clone = rb.try_clone().unwrap();
         let url = clone.url.unwrap();
         assert_eq!(url.query(), Some("existing=1&added=2"));
+    }
+
+    #[cfg(feature = "query")]
+    #[test]
+    fn query_with_explicitly_empty_query() {
+        let rb = bare_client()
+            .get("https://example.com/api?")
+            .query(&[("added", "2")]);
+        let clone = rb.try_clone().unwrap();
+        let url = clone.url.unwrap();
+        assert_eq!(url.query(), Some("added=2"));
+        assert_eq!(url.as_str(), "https://example.com/api?added=2");
     }
 
     // -- form() --

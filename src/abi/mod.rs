@@ -5,19 +5,22 @@
 //! calls these helpers instead.  Each wrapper:
 //!
 //! * returns `Result<T, Error>` so callers decide how to handle failures,
-//! * performs any `&str` → null-terminated wide string conversions, and
+//! * performs any `&str` to null-terminated wide string conversions, and
 //! * hides pointer arithmetic and `std::mem::size_of` boilerplate.
 //!
 //! The module is split into:
 //!
 //! * [`winhttp`] -- WinHTTP session, request, query, and I/O wrappers
 //! * [`encoding`] -- `MultiByteToWideChar` (NLS) and ICU charset decoding
+//! * [`idna`] -- UTS #46 domain processing through Windows system ICU
 
 mod encoding;
+mod idna;
 mod winhttp;
 
 // Re-export everything so callers use `crate::abi::winhttp_open_session` etc.
 pub(crate) use encoding::*;
+pub(crate) use idna::*;
 pub(crate) use winhttp::*;
 
 use crate::Error;

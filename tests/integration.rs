@@ -1465,10 +1465,10 @@ async fn text_decoding_charset_and_bom() {
         // Latin-1 bytes for "cafe": 0xE9 decodes to U+00E9.
         Case {
             name: "latin1",
-            body: b"caf\xE9", // spellchecker:disable-line
+            body: b"caf\xE9",
             content_type: "text/html; charset=iso-8859-1",
             fallback: None,
-            expected: "caf\u{e9}", // spellchecker:disable-line
+            expected: "caf\u{e9}",
         },
         Case {
             name: "thai",

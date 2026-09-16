@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Fixed
 - DLL load: load system icu.dll from system32 to prevent dll planting.
 - HTTP Timeouts: keep explicit zero and positive sub-millisecond phase timeouts finite by clamping/rounding to 1ms.
+- Parsing - URL: replace the hybrid WinHttpCrackUrl/bespoke URL parser with RFC 3986/3987-conformant parsing via `fluent-uri` and ICU UTS #46 handling.
 - Parsing: replace ad hoc Content-Type parsing with `mime` crate for more precise edge-case handling.
 - Request bodies: retry unwritten bytes after partial `WinHttpWriteData` success.
 - Charset decoding: match WHATWG BOM precedence over declared charsets and UTF-16LE/BE replacement behavior for malformed surrogates and odd trailing bytes.

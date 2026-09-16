@@ -2,28 +2,31 @@
 //!
 //! Provides a public [`Url`] type that matches a subset of
 //! [`url::Url`](https://docs.rs/url/latest/url/struct.Url.html)'s method
-//! signatures -- but without pulling in the `url` crate and its transitive
-//! dependencies (ICU4X, idna, percent-encoding, etc.).  Backed by
-//! `WinHttpCrackUrl` for parsing.
+//! signatures without embedding Unicode/IDNA tables. `fluent-uri` provides
+//! strict RFC 3986/3987 parsing and reference resolution; ICU
+//! provides UTS #46 conversion for non-ASCII domain names.
 //!
 //! Also provides [`IntoUrl`] (public trait) for eagerly validating URLs at
 //! request-build time, matching reqwest semantics.
 //!
 //! # Limitations
 //!
-//! Because parsing is backed by WinHTTP rather than a full WHATWG-compliant
-//! URL parser:
+//! This parser accepts valid HTTP(S) URIs and IRIs rather than implementing
+//! WHATWG error recovery for malformed browser input:
 //!
-//! - **Scheme restriction:** only `http` and `https` schemes are accepted.
-//! - **No IDNA:** international domain names are not punycode-encoded.
-//! - **Userinfo extracted manually:** `WinHttpCrackUrl` strips
-//!   `user:password@` from HTTP(S) URLs, so wrest extracts it from the
-//!   raw string before cracking.  [`Url::username`] and [`Url::password`]
-//!   return the percent-decoded values.  When a URL contains userinfo,
-//!   [`RequestBuilder::build()`](crate::RequestBuilder::build) injects an
-//!   `Authorization: Basic` header automatically (matching reqwest).
+//! - **Scheme restriction:** the native WinHTTP transport supports only
+//!   `http` and `https`.
+//! - **Unicode domains:** require ICU, shipped in Windows 10 version 1903+.
+//! - **Strict input:** malformed percent escapes and invalid RFC syntax are
+//!   rejected instead of repaired.
+//! - **Sanitized userinfo:** unlike `url::Url`, Wrest decodes userinfo and
+//!   omits it from serialization during parsing. Request construction converts
+//!   the stored credentials into `Authorization: Basic`, matching reqwest's
+//!   eventual request behavior; reqwest performs the decoding and removal
+//!   later, while building the request.
 
 use crate::{Error, abi};
+use fluent_uri::pct_enc::{Encoder, encoder::RegName};
 
 // ---------------------------------------------------------------------------
 // ParseError
@@ -38,23 +41,22 @@ use crate::{Error, abi};
 ///
 /// The variant names mirror [`url::ParseError`](https://docs.rs/url/latest/url/enum.ParseError.html) so that code which
 /// pattern-matches on specific variants can compile against both crates
-/// without changes.  Because parsing is backed by WinHTTP's
-/// `WinHttpCrackUrl`, only a subset of variants are actually produced at
-/// runtime:
+/// without changes. Only a subset of variants is produced by Wrest's strict
+/// HTTP(S) RFC parser:
 ///
 /// | Variant                            | Produced by wrest? |
 /// |------------------------------------|--------------------|
-/// | `EmptyHost`                        | No  |
-/// | `IdnaError`                        | No  |
-/// | `InvalidPort`                      | No  |
+/// | `EmptyHost`                        | Yes |
+/// | `IdnaError`                        | Yes |
+/// | `InvalidPort`                      | Yes |
 /// | `InvalidIpv4Address`               | No  |
-/// | `InvalidIpv6Address`               | No  |
-/// | `InvalidDomainCharacter`           | No  |
-/// | `RelativeUrlWithoutBase`           | No  |
+/// | `InvalidIpv6Address`               | Yes |
+/// | `InvalidDomainCharacter`           | Yes (decoded host is not a valid RFC registered name) |
+/// | `RelativeUrlWithoutBase`           | Yes (`http::Uri` conversion) |
 /// | `RelativeUrlWithCannotBeABaseBase` | No  |
 /// | `SetHostOnCannotBeABaseUrl`        | No  |
 /// | `Overflow`                         | No  |
-/// | `InvalidUrl`                       | Yes (wrest-specific catch-all for WinHTTP parse failures) |
+/// | `InvalidUrl`                       | Yes (wrest-specific catch-all for RFC parse failures) |
 /// | `UnsupportedScheme`                | Yes (wrest-specific, no `url` equivalent) |
 ///
 /// Variants marked "No" exist for pattern-matching compatibility and will
@@ -66,7 +68,8 @@ pub enum ParseError {
     /// The URL has an empty host.
     EmptyHost,
 
-    /// An internationalized domain name contained invalid characters.
+    /// An internationalized domain name contained invalid characters, or the
+    /// system could not process Unicode domain names.
     IdnaError,
 
     /// The port number is invalid.
@@ -95,16 +98,16 @@ pub enum ParseError {
 
     /// The URL could not be parsed.
     ///
-    /// This is a **wrest-specific** catch-all for any parse failure reported
-    /// by WinHTTP's `WinHttpCrackUrl` that does not map to a more specific
-    /// variant.  It has no `url::ParseError` equivalent.
+    /// This is a **wrest-specific** catch-all for RFC parse failures that do
+    /// not map to a more specific variant. It has no `url::ParseError`
+    /// equivalent.
     InvalidUrl,
 
     /// The URL scheme is not `http` or `https`.
     ///
     /// This variant is **wrest-specific** and has no `url::ParseError`
     /// equivalent.  Only `http` and `https` schemes are supported because
-    /// parsing is backed by WinHTTP.
+    /// that is what is supported by the native WinHTTP transport.
     UnsupportedScheme,
 }
 
@@ -142,11 +145,9 @@ impl std::error::Error for ParseError {}
 /// Provides the same accessor methods as the commonly-used subset of
 /// [`url::Url`](https://docs.rs/url/latest/url/struct.Url.html), so callers
 /// can switch between the two types with minimal code changes -- but without
-/// pulling in the `url` crate and its ~10 transitive dependencies (ICU4X,
-/// idna, percent-encoding, ...).
+/// pulling in the `url` crate and its Unicode/IDNA tables.
 ///
-/// Backed by `WinHttpCrackUrl` for parsing.  Only `http` and `https` schemes
-/// are supported.
+/// Backed by `fluent-uri` and Windows system ICU. Only `http` and `https` schemes are supported.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Url {
     /// The serialized URL string.
@@ -155,8 +156,7 @@ pub struct Url {
     pub(crate) scheme: String,
     /// The hostname (e.g., `"example.com"`).
     pub(crate) host: String,
-    /// Port number (always present -- default port filled in by WinHttpCrackUrl
-    /// when not explicit in the URL).
+    /// Effective transport port, including the HTTP(S) default.
     pub(crate) port: u16,
     /// Whether the port differs from the scheme's default (80 / 443), which
     /// serves as a proxy for "was the port explicitly written in the URL".
@@ -272,7 +272,7 @@ impl Url {
     ///
     /// # Reference types
     ///
-    /// | Input form           | Example              | Behaviour                                 |
+    /// | Input form           | Example              | Behavior                                  |
     /// |----------------------|----------------------|-------------------------------------------|
     /// | Absolute URL         | `https://other/path` | Parsed independently                      |
     /// | Scheme-relative      | `//other/path`       | Uses base scheme                          |
@@ -280,89 +280,34 @@ impl Url {
     /// | Relative path        | `sub/page`           | Merged with base path directory           |
     /// | Query-only           | `?q=1`               | Preserves base path                       |
     /// | Fragment-only        | `#sec`               | Preserves base path & query               |
-    /// | Empty                | `""`                 | Returns base URL                          |
+    /// | Empty                | `""`                 | Inherits path/query and removes fragment  |
     pub fn join(&self, input: &str) -> Result<Self, ParseError> {
-        // RFC 3986 §5.2.2: Reference Resolution
-
-        // Empty input returns the base URL unchanged.
-        if input.is_empty() {
-            return Url::parse_impl(&self.serialized);
-        }
-
-        // If input is an absolute URL, parse it directly.
-        if input.starts_with("http://") || input.starts_with("https://") {
-            return Url::parse_impl(input);
-        }
-
-        // Scheme-relative: //authority/path...
-        if input.starts_with("//") {
-            let resolved = format!("{}:{input}", self.scheme);
-            return Url::parse_impl(&resolved);
-        }
-
-        // Split input into path, query, and fragment components.
-        let (input_path, input_query, input_fragment) = split_reference(input);
-
-        // Fragment-only: #fragment
-        if input_path.is_empty() && input_query.is_none() {
-            // Return base URL with the new fragment.
-            let mut base_str = self.serialized_without_fragment();
-            if let Some(frag) = input_fragment {
-                base_str.push('#');
-                base_str.push_str(frag);
+        let base_without_fragment = self.serialized_without_fragment();
+        let base =
+            fluent_uri::Iri::parse(base_without_fragment.as_str()).map_err(map_fluent_error)?;
+        let reference = fluent_uri::IriRef::parse(input).map_err(map_fluent_error)?;
+        let inherits_userinfo = reference.scheme().is_none() && reference.authority().is_none();
+        if inherits_userinfo && reference.path().as_str().is_empty() {
+            let encoded = reference.to_uri_ref();
+            let mut joined = self.clone();
+            if let Some(query) = encoded.query() {
+                joined.query = Some(query.as_str().to_owned());
             }
-            return Url::parse_impl(&base_str);
+            joined.fragment = encoded
+                .fragment()
+                .map(|fragment| fragment.as_str().to_owned());
+            joined.rebuild_serialized();
+            return Ok(joined);
         }
-
-        // Query-only: ?query (possibly with fragment)
-        if input_path.is_empty() && input_query.is_some() {
-            // Preserve base path, replace query (and fragment).
-            let mut base_str = format!("{}://{}", self.scheme, self.host,);
-            if self.explicit_port {
-                base_str.push_str(&format!(":{}", self.port));
-            }
-            base_str.push_str(&self.path);
-            if let Some(q) = input_query {
-                base_str.push('?');
-                base_str.push_str(q);
-            }
-            if let Some(f) = input_fragment {
-                base_str.push('#');
-                base_str.push_str(f);
-            }
-            return Url::parse_impl(&base_str);
+        let resolved = reference
+            .resolve_against(&base)
+            .map_err(|_| ParseError::InvalidUrl)?;
+        let mut joined = Url::parse_impl(resolved.as_str())?;
+        if inherits_userinfo {
+            joined.username.clone_from(&self.username);
+            joined.password.clone_from(&self.password);
         }
-
-        // Path reference (absolute or relative).
-        let merged_path = if input_path.starts_with('/') {
-            // Absolute path -- replace entirely.
-            input_path.to_owned()
-        } else {
-            // Relative path -- merge with base path's directory.
-            // `parse_impl` guarantees `path` starts with '/', so
-            // `rsplit_once('/')` always succeeds; `unwrap_or` gives a
-            // safe fallback if it ever didn't.
-            let base_dir = self.path.rsplit_once('/').map_or("", |(dir, _)| dir);
-            format!("{base_dir}/{input_path}")
-        };
-
-        let resolved_path = remove_dot_segments(&merged_path);
-
-        let mut resolved = format!("{}://{}", self.scheme, self.host);
-        if self.explicit_port {
-            resolved.push_str(&format!(":{}", self.port));
-        }
-        resolved.push_str(&resolved_path);
-        if let Some(q) = input_query {
-            resolved.push('?');
-            resolved.push_str(q);
-        }
-        if let Some(f) = input_fragment {
-            resolved.push('#');
-            resolved.push_str(f);
-        }
-
-        Url::parse_impl(&resolved)
+        Ok(joined)
     }
 
     /// Return the host as a domain name, if applicable.
@@ -411,7 +356,7 @@ impl Url {
     /// "cannot-be-a-base" URLs).
     /// Equivalent to `url::Url::path_segments()`.
     pub fn path_segments(&self) -> Option<std::str::Split<'_, char>> {
-        // Strip the leading '/' then split (matching url::Url behaviour
+        // Strip the leading '/' then split (matching url::Url behavior
         // which yields "" for the first empty segment rather than a
         // leading empty string).
         let path = self.path.strip_prefix('/').unwrap_or(&self.path);
@@ -556,83 +501,75 @@ impl IntoUrlSealed for Url {
 impl IntoUrl for Url {}
 
 impl Url {
-    /// Parse a URL string using `WinHttpCrackUrl`.
+    /// Parse an HTTP(S) URI or IRI.
     ///
-    /// This is the sole constructor. Every `Url` is always fully cracked -- the
-    /// WinHTTP-specific fields (`is_https`, `path_and_query`) are populated
-    /// eagerly so downstream code never needs a separate conversion step.
+    /// `fluent-uri` validates and separates the RFC components. Non-ASCII
+    /// registered names are converted with the UTS #46 APIs from system ICU.
     pub(crate) fn parse_impl(url: &str) -> Result<Self, ParseError> {
-        // Extract fragment from the original URL before WinHttpCrackUrl,
-        // which would include '#...' as part of the extra-info component.
-        let (url_for_crack, fragment) = match url.split_once('#') {
-            Some((before, frag)) => (
-                before,
-                if frag.is_empty() {
-                    None
-                } else {
-                    Some(frag.to_owned())
-                },
-            ),
-            None => (url, None),
-        };
-
-        // Extract userinfo (user:password@) before WinHttpCrackUrl, which
-        // strips it from HTTP(S) URLs. We parse it manually from the raw
-        // string: look for `://`, then find `@` before the next `/`.
-        let (url_without_userinfo, username, password) = extract_userinfo(url_for_crack);
-        let password = password.map(crate::redact::Redacted::new);
-
-        let cracked = abi::winhttp_crack_url(url_without_userinfo.as_ref())
-            .map_err(|_| ParseError::InvalidUrl)?;
-
-        let scheme = cracked.scheme;
+        let parsed = fluent_uri::Iri::parse(url).map_err(map_fluent_error)?;
+        let scheme = parsed.scheme().as_str().to_ascii_lowercase();
         let is_https = scheme.eq_ignore_ascii_case("https");
         if !is_https && !scheme.eq_ignore_ascii_case("http") {
             return Err(ParseError::UnsupportedScheme);
         }
-        let scheme_lower = scheme.to_ascii_lowercase();
-
-        let host = cracked.host;
-        let port = cracked.port;
+        let authority = parsed.authority().ok_or(ParseError::EmptyHost)?;
+        if authority.host().is_empty() {
+            return Err(ParseError::EmptyHost);
+        }
+        let host = match authority.host_parsed() {
+            fluent_uri::component::Host::Ipv4(address) => address.to_string(),
+            fluent_uri::component::Host::Ipv6(address) => format!("[{address}]"),
+            fluent_uri::component::Host::IpvFuture { .. } => authority.host().to_owned(),
+            fluent_uri::component::Host::RegName(name) => normalize_registered_name(name.as_str())?,
+        };
         let default_port: u16 = if is_https { 443 } else { 80 };
-        let explicit_port = port != default_port;
+        let parsed_port = authority
+            .port_to_u16()
+            .map_err(|_| ParseError::InvalidPort)?;
+        let port = parsed_port.unwrap_or(default_port);
+        let explicit_port = parsed_port.is_some_and(|port| port != default_port);
 
-        let raw_path = cracked.path;
-        let extra = cracked.extra;
+        let encoded = parsed.to_uri();
+        let encoded_authority = encoded.authority().ok_or(ParseError::EmptyHost)?;
+        let (username, password) = match encoded_authority.userinfo() {
+            Some(userinfo) => {
+                let (raw_user, raw_pass) = match userinfo.as_str().split_once(':') {
+                    Some((user, pass)) => (user, Some(pass)),
+                    None => (userinfo.as_str(), None),
+                };
+                decode_userinfo(raw_user, raw_pass)
+            }
+            None => Default::default(),
+        };
+        let password = password.map(crate::redact::Redacted::new);
 
-        let path = if raw_path.is_empty() {
+        let path = if encoded.path().as_str().is_empty() {
             "/".to_owned()
         } else {
-            raw_path
+            encoded.path().as_str().to_owned()
         };
+        let query = encoded.query().map(|query| query.as_str().to_owned());
+        let fragment = encoded
+            .fragment()
+            .map(|fragment| fragment.as_str().to_owned());
+        let path_and_query = query
+            .as_ref()
+            .map_or_else(|| path.clone(), |query| format!("{path}?{query}"));
 
-        let query = extract_query_from_extra(&extra);
-
-        // path_and_query excludes the fragment -- WinHTTP does not send it.
-        let path_and_query = if extra.is_empty() {
-            path.clone()
-        } else {
-            format!("{path}{extra}")
-        };
-
-        // Rebuild serialized from the cracked components so that
-        // `as_str()` agrees with `path()`, `query()`, etc.
-        // WinHttpCrackUrl (with flags=0) preserves percent-encoding
-        // as-is, so the roundtripped string matches the input.
-        let mut serialized = if explicit_port {
-            format!("{scheme_lower}://{host}:{port}")
-        } else {
-            format!("{scheme_lower}://{host}")
-        };
+        let mut serialized = format!("{scheme}://{host}");
+        if explicit_port {
+            serialized.push(':');
+            serialized.push_str(&port.to_string());
+        }
         serialized.push_str(&path_and_query);
-        if let Some(ref frag) = fragment {
+        if let Some(fragment) = &fragment {
             serialized.push('#');
-            serialized.push_str(frag);
+            serialized.push_str(fragment);
         }
 
         Ok(Url {
             serialized,
-            scheme: scheme_lower,
+            scheme,
             host,
             port,
             explicit_port,
@@ -652,8 +589,15 @@ impl Url {
     /// `serialized` to stay consistent with the other fields.
     #[cfg_attr(all(not(feature = "query"), not(test)), expect(dead_code))]
     pub(crate) fn set_query_string(&mut self, query: String) {
-        self.path_and_query = format!("{}?{query}", self.path);
         self.query = Some(query);
+        self.rebuild_serialized();
+    }
+
+    fn rebuild_serialized(&mut self) {
+        self.path_and_query = self
+            .query
+            .as_ref()
+            .map_or_else(|| self.path.clone(), |query| format!("{}?{query}", self.path));
         let mut serialized = if self.explicit_port {
             format!("{}://{}:{}", self.scheme, self.host, self.port)
         } else {
@@ -667,83 +611,16 @@ impl Url {
         self.serialized = serialized;
     }
 
-    /// Build a `Url` directly from an [`http::Uri`] without re-parsing.
+    /// Build a `Url` from an absolute [`http::Uri`].
     ///
-    /// The URI's scheme, authority, path and query are already validated
-    /// by the `http` crate, so we construct the `Url` from parts
-    /// instead of serializing and re-cracking through `WinHttpCrackUrl`.
+    /// The `http` crate has already validated its URI syntax. Routing the
+    /// serialized form through the common parser applies the same scheme,
+    /// authority, and host policy as other inputs.
     pub(crate) fn from_http_uri(uri: &http::Uri) -> Result<Self, ParseError> {
-        let scheme = uri.scheme_str().ok_or(ParseError::RelativeUrlWithoutBase)?;
-        let is_https = scheme.eq_ignore_ascii_case("https");
-        if !is_https && !scheme.eq_ignore_ascii_case("http") {
-            return Err(ParseError::UnsupportedScheme);
+        if uri.scheme().is_none() {
+            return Err(ParseError::RelativeUrlWithoutBase);
         }
-        let scheme_lower = scheme.to_ascii_lowercase();
-
-        let authority = uri.authority().ok_or(ParseError::EmptyHost)?;
-        let host = authority.host().to_owned();
-        if host.is_empty() {
-            return Err(ParseError::EmptyHost);
-        }
-
-        let default_port: u16 = if is_https { 443 } else { 80 };
-        let port = authority.port_u16().unwrap_or(default_port);
-        let explicit_port = port != default_port;
-
-        let (path, query) = match uri.path_and_query() {
-            Some(pq) => {
-                let p = pq.path();
-                let path = if p.is_empty() {
-                    "/".to_owned()
-                } else {
-                    p.to_owned()
-                };
-                let query = pq.query().map(|q| q.to_owned());
-                (path, query)
-            }
-            None => ("/".to_owned(), None),
-        };
-
-        let path_and_query = match &query {
-            Some(q) => format!("{path}?{q}"),
-            None => path.clone(),
-        };
-
-        // Extract userinfo from the authority (RFC 3986 §3.2.1).
-        let auth_str = authority.as_str();
-        let (username, password) = match auth_str.rsplit_once('@') {
-            Some((userinfo, _)) => match userinfo.split_once(':') {
-                Some((u, p)) => (percent_decode(u), Some(percent_decode(p))),
-                None => (percent_decode(userinfo), None),
-            },
-            None => (String::new(), None),
-        };
-        let password = password.map(crate::redact::Redacted::new);
-
-        // http::Uri does not carry fragments.
-        let fragment = None;
-
-        let mut serialized = if explicit_port {
-            format!("{scheme_lower}://{host}:{port}")
-        } else {
-            format!("{scheme_lower}://{host}")
-        };
-        serialized.push_str(&path_and_query);
-
-        Ok(Url {
-            serialized,
-            scheme: scheme_lower,
-            host,
-            port,
-            explicit_port,
-            path,
-            query,
-            fragment,
-            is_https,
-            path_and_query,
-            username,
-            password,
-        })
+        Self::parse_impl(&uri.to_string())
     }
 
     /// Convert this `Url` into an [`http::Uri`] from parts (no string roundtrip).
@@ -751,8 +628,8 @@ impl Url {
     /// Fragments are dropped because `http::Uri` does not carry them.
     ///
     /// In practice this conversion cannot fail: the scheme, authority, and
-    /// path-and-query components were already validated by WinHTTP during
-    /// `Url` construction, so they always satisfy `http::Uri`'s requirements.
+    /// path-and-query components were already validated during `Url`
+    /// construction, so they satisfy `http::Uri`'s requirements.
     /// The `Result` exists only because the `http::Uri` builder API is
     /// generically fallible.
     pub(crate) fn to_http_uri(&self) -> Result<http::Uri, http::Error> {
@@ -769,211 +646,51 @@ impl Url {
     }
 }
 
-/// Extract userinfo (`user:password@`) from a URL string.
-///
-/// WinHTTP's `WinHttpCrackUrl` strips userinfo from HTTP(S) URLs, so we
-/// extract it manually before cracking. Returns `(url_without_userinfo,
-/// username, password)`.
-///
-/// The returned URL has the `user:password@` portion removed so that
-/// `WinHttpCrackUrl` can parse the remainder normally. Username and
-/// password are percent-decoded.
-///
-/// Examples:
-///   `http://alice:s3cret@host/path` → `("http://host/path", "alice", Some("s3cret"))`
-///   `http://alice@host/path`        → `("http://host/path", "alice", None)`
-///   `http://host/path`              → `("http://host/path", "", None)`
-fn extract_userinfo(url: &str) -> (std::borrow::Cow<'_, str>, String, Option<String>) {
-    // Find the authority start ("://") -- RFC 3986 §3.2.
-    let (scheme_colon_slashes, authority_and_rest) = match url.split_once("://") {
-        Some((scheme, rest)) => (scheme, rest),
-        None => return (std::borrow::Cow::Borrowed(url), String::new(), None),
-    };
-
-    // Split authority from path/query/fragment at the first '/'
-    let authority_part = match authority_and_rest.split_once('/') {
-        Some((auth, _)) => auth,
-        None => authority_and_rest,
-    };
-
-    // Look for '@' in the authority -- this separates userinfo from host.
-    let (userinfo, _host_part) = match authority_part.rsplit_once('@') {
-        Some(parts) => parts,
-        None => return (std::borrow::Cow::Borrowed(url), String::new(), None),
-    };
-
-    let (raw_user, raw_pass) = match userinfo.split_once(':') {
-        Some((user, pass)) => (user, Some(pass)),
-        None => (userinfo, None),
-    };
-
-    let username = percent_decode(raw_user);
-    let password = raw_pass.map(percent_decode);
-
-    // Reconstruct the URL without userinfo: skip past "userinfo@".
-    // We already found '@' in `authority_part` above, so `rsplit_once('@')`
-    // on the full `authority_and_rest` always succeeds.
-    let after_at = authority_and_rest
-        .rsplit_once('@')
-        .map_or(authority_and_rest, |(_, rest)| rest);
-    let cleaned = format!("{scheme_colon_slashes}://{after_at}");
-
-    (std::borrow::Cow::Owned(cleaned), username, password)
-}
-
-/// Percent-decode a string (e.g. `%40` → `@`).
-fn percent_decode(input: &str) -> String {
-    let mut out = Vec::with_capacity(input.len());
-    let mut rest = input.as_bytes();
-    while let [first, tail @ ..] = rest {
-        if *first == b'%'
-            && let [hi, lo, after @ ..] = tail
-            && let (Some(hi_n), Some(lo_n)) = (hex_nibble(*hi), hex_nibble(*lo))
-        {
-            out.push(hi_n << 4 | lo_n);
-            rest = after;
-        } else {
-            out.push(*first);
-            rest = tail;
-        }
+fn map_fluent_error(error: fluent_uri::ParseError) -> ParseError {
+    match error.kind() {
+        fluent_uri::ParseErrorKind::InvalidIpv6Addr => ParseError::InvalidIpv6Address,
+        fluent_uri::ParseErrorKind::InvalidPctEncodedOctet
+        | fluent_uri::ParseErrorKind::UnexpectedChar => ParseError::InvalidUrl,
     }
-    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
-/// Convert an ASCII hex character to its nibble value.
-fn hex_nibble(b: u8) -> Option<u8> {
-    char::from(b)
-        .to_digit(16)
-        .and_then(|d| u8::try_from(d).ok())
-}
-
-/// Classification of a path segment for RFC 3986 §5.2.4 dot-segment
-/// removal.  `%2e` / `%2E` count as dots, per §6.2.2.2 (percent-encoded
-/// unreserved characters normalize to their literal form).
-enum DotClass {
-    /// `.`, `%2e`, or `%2E`
-    Dot,
-    /// `..`, `.%2e`, `%2e.`, `%2e%2e`, `%2e%2E`, `%2E%2e`, `%2E%2E`
-    DotDot,
-    /// Anything else.
-    Other,
-}
-
-/// Consume one leading "dot token" -- literal `.` or `%2e` / `%2E` --
-/// returning the remainder, or `None` if the segment doesn't start with one.
-fn strip_dot_token(s: &str) -> Option<&str> {
-    s.strip_prefix('.')
-        .or_else(|| s.strip_prefix("%2e"))
-        .or_else(|| s.strip_prefix("%2E"))
-}
-
-fn classify_segment(segment: &str) -> DotClass {
-    // RFC 3986 §5.2.4 only cares about segments of exactly 1 or 2
-    // dot-tokens. Try to consume one; bail if the segment doesn't start
-    // with a dot-token at all.
-    let Some(after_one) = strip_dot_token(segment) else {
-        return DotClass::Other;
-    };
-    if after_one.is_empty() {
-        return DotClass::Dot;
+fn normalize_registered_name(host: &str) -> Result<String, ParseError> {
+    let decoded = percent_decode(host)?;
+    if decoded
+        .chars()
+        .any(|ch| ch.is_ascii() && !RegName::TABLE.allows(ch))
+    {
+        return Err(ParseError::InvalidDomainCharacter);
     }
-    let Some(after_two) = strip_dot_token(after_one) else {
-        return DotClass::Other;
-    };
-    if after_two.is_empty() {
-        return DotClass::DotDot;
-    }
-    DotClass::Other
-}
-
-/// Remove dot-segments from a path per RFC 3986 §5.2.4.
-///
-/// Recognises percent-encoded dots (`%2e` / `%2E`) as `.` per RFC 3986
-/// §6.2.2.2 -- without this, an attacker-controlled relative reference
-/// `%2e%2e/secret` joined against a trusted base would escape the base
-/// path. Note that `%2f` (encoded slash) is **not** decoded; per RFC 3986
-/// it is a literal slash inside a single segment, not a separator --
-/// matching WinHTTP's wire-level treatment.
-fn remove_dot_segments(path: &str) -> String {
-    let mut output: Vec<&str> = Vec::new();
-    let mut last_was_dot = false;
-
-    for segment in path.split('/') {
-        match classify_segment(segment) {
-            DotClass::Dot => last_was_dot = true,
-            DotClass::DotDot => {
-                output.pop();
-                last_was_dot = true;
-            }
-            DotClass::Other => {
-                output.push(segment);
-                last_was_dot = false;
-            }
-        }
+    if decoded.is_ascii() {
+        return Ok(decoded.to_ascii_lowercase());
     }
 
-    let mut result = output.join("/");
-
-    // Ensure the path starts with '/' for absolute paths
-    if !result.starts_with('/') {
-        result.insert(0, '/');
+    let ascii = abi::idna_to_ascii(&decoded).map_err(|_| ParseError::IdnaError)?;
+    if !ascii.chars().all(|ch| RegName::TABLE.allows(ch)) {
+        return Err(ParseError::IdnaError);
     }
-
-    // Preserve trailing slash when the input's final segment was a dot
-    // (literal or percent-encoded): `/foo/.`, `/foo/..`, `/foo/%2e`, etc.
-    if last_was_dot && !result.ends_with('/') {
-        result.push('/');
-    }
-
-    result
+    Ok(ascii)
 }
 
-/// Split a URI reference into `(path, query, fragment)` components
-/// per RFC 3986 §3 syntax:
-///
-/// ```text
-/// URI-reference = [ path ] [ "?" query ] [ "#" fragment ]
-/// ```
-///
-/// Supports the forms used by `Url::join`:
-/// - `""` → `("", None, None)`
-/// - `"#frag"` → `("", None, Some("frag"))`
-/// - `"?q=1"` → `("", Some("q=1"), None)`
-/// - `"?q=1#f"` → `("", Some("q=1"), Some("f"))`
-/// - `"path?q=1#f"` → `("path", Some("q=1"), Some("f"))`
-/// - `"/abs"` → `("/abs", None, None)`
-fn split_reference(input: &str) -> (&str, Option<&str>, Option<&str>) {
-    // Split off fragment first (RFC 3986 §3.5).
-    let (before_frag, fragment) = match input.split_once('#') {
-        Some((before, f)) => (before, if f.is_empty() { None } else { Some(f) }),
-        None => (input, None),
-    };
-
-    // Split path and query (RFC 3986 §3.4).
-    let (path, query) = match before_frag.split_once('?') {
-        Some((p, q)) => (p, if q.is_empty() { None } else { Some(q) }),
-        None => (before_frag, None),
-    };
-
-    (path, query, fragment)
+fn decode_userinfo(raw_user: &str, raw_pass: Option<&str>) -> (String, Option<String>) {
+    let username = percent_decode_userinfo(raw_user);
+    let password = raw_pass.map(percent_decode_userinfo);
+    (username, password)
 }
 
-/// Extract the query string from the "extra info" returned by
-/// `WinHttpCrackUrl`.
-///
-/// The extra info contains everything after the URL path. Because
-/// `parse_impl` strips the fragment *before* calling `WinHttpCrackUrl`,
-/// the extra info only ever contains an optional query string:
-///   `?key=val&a=b`  ->  `Some("key=val&a=b")`
-///   `?`             ->  `None`
-///   (empty)         ->  `None`
-fn extract_query_from_extra(extra: &str) -> Option<String> {
-    let q = extra.strip_prefix('?')?;
-    if q.is_empty() {
-        None
-    } else {
-        Some(q.to_owned())
-    }
+/// Percent-decode a UTF-8 string (e.g. `%40` to `@`).
+fn percent_decode(input: &str) -> Result<String, ParseError> {
+    percent_encoding::percent_decode_str(input)
+        .decode_utf8()
+        .map(std::borrow::Cow::into_owned)
+        .map_err(|_| ParseError::InvalidUrl)
+}
+
+fn percent_decode_userinfo(input: &str) -> String {
+    percent_encoding::percent_decode_str(input)
+        .decode_utf8_lossy()
+        .into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -999,20 +716,73 @@ impl<'de> serde::Deserialize<'de> for Url {
 mod tests {
     use super::*;
 
+    #[test]
+    fn percent_decode_matches_url_userinfo_expectations() {
+        assert_eq!(percent_decode("alice%40example.com").unwrap(), "alice@example.com");
+        assert_eq!(percent_decode("literal%ZZpercent").unwrap(), "literal%ZZpercent");
+        assert_eq!(percent_decode("%FF").unwrap_err(), ParseError::InvalidUrl);
+        assert_eq!(percent_decode_userinfo("%FF"), "\u{FFFD}");
+        assert_eq!(
+            Url::parse(concat!("https://", "%FF", "@example.com"))
+                .unwrap()
+                .username(),
+            "\u{FFFD}"
+        );
+    }
+
+    #[test]
+    fn unicode_domains_use_system_uts46() {
+        let result = Url::parse("https://faß.de/path");
+        if crate::abi::is_icu_idna_available() {
+            let url = result.unwrap();
+            assert_eq!(url.host_str(), Some("xn--fa-hia.de"));
+            assert_eq!(url.as_str(), "https://xn--fa-hia.de/path");
+        } else {
+            assert_eq!(result.unwrap_err(), ParseError::IdnaError);
+        }
+    }
+
+    #[test]
+    fn encoded_and_ascii_registered_names_do_not_require_icu() {
+        let valid = [
+            ("https://%65xample.com/", "example.com"),
+            ("https://%2Dfoo.com/", "-foo.com"),
+            ("https://xn--/", "xn--"),
+        ];
+        for (input, expected_host) in valid {
+            assert_eq!(Url::parse(input).unwrap().host_str(), Some(expected_host), "{input}");
+        }
+
+        let invalid = [
+            "https://example%2Fattacker.com/",
+            "https://exa%22mple.com/",
+            "https://exa%60mple.com/",
+            "https://exa%7Bmple.com/",
+            "https://exa%7Dmple.com/",
+        ];
+        for input in invalid {
+            assert_eq!(
+                Url::parse(input).unwrap_err(),
+                ParseError::InvalidDomainCharacter,
+                "{input}"
+            );
+        }
+    }
+
     // -- Url parsing tests (data-driven) --
 
     /// (input, host, port, path, query, fragment)
     type ParseCase =
         (&'static str, &'static str, u16, &'static str, Option<&'static str>, Option<&'static str>);
 
-    /// All RFC-3986-valid URLs; WinHttpCrackUrl with `flags=0` must parse
-    /// these correctly and preserve percent-encoding without double-encoding.
+    /// RFC-3986-valid URLs that must parse without changing component meaning.
     const PARSE_CASES: &[ParseCase] = &[
         // Basic structure
         ("https://example.com/api/v1?id=42", "example.com", 443, "/api/v1", Some("id=42"), None),
         ("http://localhost:8080/test", "localhost", 8080, "/test", None, None),
         ("https://example.com", "example.com", 443, "/", None, None),
         ("http://example.com", "example.com", 80, "/", None, None),
+        ("https://[v1.addr]/resource", "[v1.addr]", 443, "/resource", None, None),
         (
             "https://example.com/path/to/resource",
             "example.com",
@@ -1200,16 +970,11 @@ mod tests {
             ("https://example.com/#frag", "/", None, Some("frag")),
             // Query and fragment
             ("https://example.com/?q=1#sect", "/", Some("q=1"), Some("sect")),
-            // Empty fragment (hash only) -- covers frag.is_empty() -> None
-            ("https://example.com/page#", "/page", None, None),
-            // Empty query (question mark only) -- covers q.is_empty() -> None
-            ("https://example.com/page?", "/page", None, None),
-            // Both empty -- covers both empty branches
-            ("https://example.com/page?#", "/page", None, None),
-            // Query present + empty fragment -- covers frag.is_empty() with query
-            ("https://example.com/path?q=1#", "/path", Some("q=1"), None),
-            // Empty query + fragment present -- covers q.is_empty() with frag
-            ("https://example.com/path?#frag", "/path", None, Some("frag")),
+            ("https://example.com/page#", "/page", None, Some("")),
+            ("https://example.com/page?", "/page", Some(""), None),
+            ("https://example.com/page?#", "/page", Some(""), Some("")),
+            ("https://example.com/path?q=1#", "/path", Some("q=1"), Some("")),
+            ("https://example.com/path?#frag", "/path", Some(""), Some("frag")),
         ];
 
         for &(input, path, query, fragment) in cases {
@@ -1391,12 +1156,12 @@ mod tests {
             "https://example.com/a/",
             "trailing %2e%2e preserves trailing slash",
         ),
-        // -- Empty input → returns base URL --
+        // -- Empty input inherits everything except the fragment --
         (
             "https://example.com/a/b?q=1#f",
             "",
-            "https://example.com/a/b?q=1#f",
-            "empty input returns base",
+            "https://example.com/a/b?q=1",
+            "empty input removes fragment",
         ),
         // -- Query-only --
         (
@@ -1458,6 +1223,29 @@ mod tests {
     }
 
     #[test]
+    fn empty_path_references_preserve_base_dot_segments() {
+        let cases = [
+            ("https://example.com/a/../b?old=1#old", "", "https://example.com/a/../b?old=1"),
+            ("https://example.com/a/../b?old=1#old", "?new=1", "https://example.com/a/../b?new=1"),
+            (
+                "https://example.com/a/../b?old=1#old",
+                "#new",
+                "https://example.com/a/../b?old=1#new",
+            ),
+            (
+                "https://example.com/a/%2e%2e/b?old=1#old",
+                "?new=1",
+                "https://example.com/a/%2e%2e/b?new=1",
+            ),
+        ];
+
+        for (base, reference, expected) in cases {
+            let base = Url::parse(base).unwrap();
+            assert_eq!(base.join(reference).unwrap().as_str(), expected, "{reference:?}");
+        }
+    }
+
+    #[test]
     fn url_join_preserves_custom_port() {
         let base = Url::parse("https://example.com:9443/api").unwrap();
         let joined = base.join("/other").unwrap();
@@ -1494,8 +1282,6 @@ mod tests {
             ("https://user%41%62:p%4Fss@example.com/", "userAb", Some("pOss")),
             // Lowercase hex a-f: %5A='Z', %6a='j' -- covers hex_nibble a-f branch
             ("https://%5A%6a@example.com/", "Zj", None),
-            // Invalid hex -- %GG passes through literally (covers hex_nibble None)
-            ("http://user%GG:pass@example.com/path", "user%GG", Some("pass")),
         ];
 
         for &(input, username, password) in cases {
@@ -1513,25 +1299,6 @@ mod tests {
         assert!(!url.as_str().contains("s3cret"));
         assert_eq!(url.host_str(), Some("example.com"));
         assert_eq!(url.path(), "/path");
-    }
-
-    #[test]
-    fn extract_userinfo_table() {
-        // (input, expected_cleaned, expected_user, expected_pass)
-        let cases: &[(&str, &str, &str, Option<&str>)] = &[
-            ("https://example.com/path", "https://example.com/path", "", None),
-            ("https://alice:pw@host:8080/path", "https://host:8080/path", "alice", Some("pw")),
-            ("http://user@host", "http://host", "user", None),
-            // Defend against a userinfo containing a literal '@' - we need to split at the last '@'
-            ("https://user%40name:pw@host/p", "https://host/p", "user@name", Some("pw")),
-        ];
-
-        for &(input, cleaned, user, pass) in cases {
-            let (actual_cleaned, actual_user, actual_pass) = extract_userinfo(input);
-            assert_eq!(actual_cleaned.as_ref(), cleaned, "{input}: cleaned");
-            assert_eq!(actual_user, user, "{input}: username");
-            assert_eq!(actual_pass.as_deref(), pass, "{input}: password");
-        }
     }
 
     #[test]
@@ -1617,6 +1384,12 @@ mod tests {
             "unsupported scheme",
         ),
         ("not a url", ParseError::InvalidUrl, "invalid URL", "invalid url (catch-all)"),
+        (
+            concat!("https://", "user%GG", ":", "pass", "@example.com/path"),
+            ParseError::InvalidUrl,
+            "invalid URL",
+            "invalid percent encoding in userinfo",
+        ),
     ];
 
     #[test]
@@ -1827,7 +1600,7 @@ mod tests {
             assert_eq!(url.password(), pass, "{label}: password");
             assert!(url.as_str().contains(contains), "{label}: serialized contains {contains:?}");
 
-            // Roundtrip: from_http_uri → to_http_uri preserves scheme + authority + path_and_query
+            // Roundtrip: from_http_uri -> to_http_uri preserves scheme + authority + path_and_query
             let back = url
                 .to_http_uri()
                 .unwrap_or_else(|e| panic!("{label}: to_http_uri: {e}"));

@@ -2,16 +2,22 @@
 
 ## The Two Standards
 
-There are two URL standards:
+There are two URL standards. In this document, **RFC** is used as a shorthand
+meaning the standard set by RFC 3986 and RFC 3987 together, in contrast to **WHATWG**.
 
-### RFC 3986 (2005, IETF)
+### RFC 3986 and RFC 3987 (IETF)
 
 [RFC 3986 — Uniform Resource Identifier (URI): Generic Syntax](https://www.rfc-editor.org/rfc/rfc3986)
-superseded the earlier RFC 2396 (1998) and remains the *de jure* standard
-referenced by most protocol specifications, HTTP RFCs, and server-side software.
+The *de jure* standard referenced by most protocol specifications, HTTP RFCs,
+and server-side software.
 
-- **Defines a formal grammar** for valid URIs.  Input that does not match the
-  grammar is invalid; the RFC does not define what a parser should do with it.
+[RFC 3987 — Internationalized Resource Identifiers (IRIs)](https://www.rfc-editor.org/rfc/rfc3987)
+extends that model to Unicode and defines how IRIs map to ASCII URIs. It does
+not select an IDNA policy for Unicode domain names.
+
+- **Defines a formal grammar** for valid URIs and IRIs.  Input that does not
+  match the grammar is invalid; the RFCs do not define what a parser should do
+  with it.
 - **Used by**: server-side frameworks, Java's `java.net.URI`, Go's `net/url`,
   Rust's `http::Uri`, API specifications, protocol RFCs.
 - **Normalization**: SHOULD lowercase scheme (§3.1), SHOULD uppercase hex digits
@@ -23,161 +29,125 @@ referenced by most protocol specifications, HTTP RFCs, and server-side software.
 
 [WHATWG URL Standard](https://url.spec.whatwg.org/)
 
-RFC 3986 did not define error recovery for invalid input, leading to divergent
+RFC does not define error recovery for invalid input, leading to divergent
 behavior across implementations — especially browsers, each of which developed
 its own quirks.  The WHATWG URL Standard standardizes results for invalid URL
 handling as well, defining precise behavior for every possible input string.
 
-- **Superset of RFC 3986**: every RFC-3986-valid HTTP/HTTPS URL is accepted by
-  WHATWG with the same parsed result.  WHATWG additionally defines error recovery
-  for invalid input — what RFC 3986 leaves as undefined behavior.
+- **Recovery and special-host processing**: WHATWG accepts many strings that
+  are invalid under RFC, but can reject or reinterpret some RFC-valid
+  registered names.
 - **Used by**: all browsers (Chrome, Firefox, Safari, Edge), Rust's `url` crate,
   reqwest, Python's `urllib.parse` (partially), Node.js's `new URL()`.
-- **Covers**: relative URL resolution, IDNA via Unicode UTS46, precise
-  percent-encode sets per component, IPv4/IPv6 parsing and serialization,
+- **Covers**: relative URL resolution, IDNA via Unicode UTS #46, precise
+  percent-encode sets per component, legacy IPv4 parsing and serialization,
   backslash-as-slash for "special" schemes, tab/newline stripping,
   forbidden host code point rejection.
 - **Official test suite**: [web-platform-tests/wpt/url/](https://github.com/web-platform-tests/wpt/tree/master/url),
   with the canonical test data in
-  [`urltestdata.json`](https://github.com/web-platform-tests/wpt/blob/master/url/resources/urltestdata.json)
-  (984 test cases as of February 2026).  The test data does not distinguish
-  which inputs are RFC-3986-valid; it only specifies expected WHATWG parser
-  output.
+  [`urltestdata.json`](https://github.com/web-platform-tests/wpt/blob/master/url/resources/urltestdata.json).
+  The test data does not distinguish which inputs are RFC-valid; it specifies
+  only the expected WHATWG result.
 
-### Relationship between the two
+### Relationship Between the Two
 
-RFC 3986 defines a formal grammar for valid URIs.  WHATWG is a strict superset:
-it accepts every RFC-3986-valid URL and additionally defines deterministic
-behavior for invalid input that the RFC leaves undefined.  For valid input, both
-standards produce the same parsed result.
+RFC defines valid URI/IRI syntax and is a common basis for protocol,
+server-side, and other non-browser URL handling. WHATWG builds on the same
+component model with additional browser-oriented recovery, canonicalization,
+and special-host policy.
 
-## WinHTTP's URL Parser
+Most ordinary well-formed HTTP(S) URLs have the same component meaning in both
+models. Interoperable software generally stays within this shared subset.
+Differences concentrate in malformed browser input, legacy numeric host
+syntax, and a small set of registered names affected by WHATWG's special-host
+policy.
 
-[`WinHttpCrackUrl`](https://learn.microsoft.com/en-us/windows/win32/api/winhttp/nf-winhttp-winhttpcrackurl)
-splits URLs into components.  In practice, WinHTTP implements RFC 3986 for valid
-URLs — all well-formed HTTP/HTTPS URIs are parsed correctly, producing the same
-components as both the RFC and WHATWG standards.
+## Semantic Differences and Impact
 
-Where WinHTTP differs is in error handling.  For invalid input, WinHTTP's
-behavior diverges from both RFC 3986 (which leaves it undefined) and WHATWG
-(which defines specific error recovery).  WinHTTP tends to be **more
-permissive** than either standard, accepting many forms of invalid input without
-erroring.  As Microsoft's own documentation states: "WinHttpCrackUrl does not
-check the validity or format of a URL before attempting to crack it."
+| Operation | RFC | WHATWG | Impact |
+|-----------|-----|--------|--------|
+| Splitting scheme, authority, path, query, and fragment | Defined by grammar | Defined by parser states | Shared legal forms generally produce the same components |
+| Invalid-input recovery | Not defined | Defined for every input | Input accepted by `url::Url` can be rejected by an RFC parser |
+| Scheme lowercasing | Recommended (§3.1) | Required | Serialization can differ without changing identity |
+| Dot-segment resolution (`/a/../b` → `/b`) | During relative resolution (§5.2.4) | Also during special-URL parsing | Absolute paths can serialize differently |
+| `%2e` / `%2E` treated as a dot segment | Not during parsing | Yes for special URLs | Resource paths can differ |
+| Registered-name validation | Allows unreserved characters, sub-delimiters, and percent-encoded octets | Percent-decodes before special-host validation | An RFC-valid host can be rejected after decoding |
+| Numeric hosts | Dotted-decimal IPv4 or registered name | Legacy decimal, octal, hexadecimal, and shortened IPv4 | The same spelling can select a domain or an IP address |
+| Port validation | Syntax permits digits; meaning is scheme-specific | Rejects values above 65535 and removes defaults | Acceptance and serialization can differ |
+| Tab/newline stripping | Invalid | Stripped silently | Visually different input can become the same URL |
+| Backslash as slash | Invalid | Applied to special schemes | `http:\\host\path` becomes an HTTP URL only under WHATWG |
+| Relative URL resolution | Defined (§5) | Defined by the browser algorithm | Shared cases align; recovery cases can differ |
+| Unicode domains | RFC 3987 plus a separate IDNA policy | Nontransitional UTS #46 | Different IDNA generations can select different domains |
+| Empty query or fragment | Present-but-empty differs from absent | Same distinction | `?` clears an inherited query; absence inherits it |
 
-| Operation | RFC 3986 | WHATWG | WinHTTP |
-|-----------|----------|-------|---------|
-| Splitting (scheme, host, port, path, query, fragment) | ✅ | ✅ | ✅ |
-| Scheme lowercasing | SHOULD (§3.1) | ✅ | ✅ (case-insensitive matching) |
-| Dot-segment resolution (`/a/../b` → `/b`) | Only for relative resolution (§5.2.4) | ✅ (always) | ❌ returns `/a/../b` |
-| `%2e` / `%2E` treated as `.` for dot-segments | ❌ | ✅ | ❌ |
-| Host validation (reject forbidden chars) | ✅ (§3.2.2) | ✅ | ❌ accepts anything |
-| Port validation (reject >65535, negative) | ✅ (§3.2.3) | ✅ | Partial |
-| Percent-encoding normalization | SHOULD (§6.2.2.1) | ✅ (component-aware) | ❌ |
-| Tab/newline stripping | ❌ (invalid) | ✅ (strip silently) | ❌ (rejects) |
-| Backslash as slash (special schemes) | ❌ (invalid) | ✅ | ❌ (rejects) |
-| Relative URL resolution | ✅ (§5) | ✅ | ❌ |
-| IDNA (internationalized domains) | Defers to RFC 3490 | ✅ (UTS46) | ❌ |
-| NUL byte handling | N/A | Encodes as `%00` | Truncates (C-string) |
-| Userinfo extraction for HTTP | Preserved | Preserved | Stripped silently |
+### Where Differences Are Observable
 
-### WinHTTP-specific quirks
+- **Destination identity**: unusual IDNA or numeric-host spellings can be
+  interpreted differently.
+- **Resource identity**: dot-segment and percent-encoding behavior can change
+  the request path.
+- **Acceptance**: browser-oriented code may accept input that a strict RFC
+  parser rejects.
+- **Serialization**: case, default ports, and empty components can differ even
+  when two URLs refer to the same resource.
 
-These behaviors match neither standard:
+Most software encounters conventional hostnames for which these policies
+agree. The differences matter primarily for browser recovery cases, legacy
+spellings, or inputs deliberately constructed around edge syntax. RFC leaves
+IDNA policy to the implementation, while WHATWG specifies nontransitional
+UTS #46.
 
-- Accepts `[www.google.com]` as a host (both standards say brackets are only for
-  IPv6 addresses).
-- Accepts C0 control characters (U+0000–U+001F) literally in hostnames.
-- Silently strips userinfo (`user:pass@`) from HTTP/HTTPS URLs.
-- Truncates at NUL byte (C-string semantics).
+Legacy numeric hosts are another narrow difference. WHATWG interprets
+`192.0x00A80001` as `192.168.0.1`; an RFC parser can retain it as a registered
+name. WHATWG rejects invalid numeric-looking hosts such as `256.0.0.1` rather
+than treating them as registered names.
 
-## Percent-Encoding
+## WHATWG Test Suite vs RFC
 
-### The non-idempotency problem
+Wrest checks the WHATWG `urltestdata.json` corpus to ensure equivalent behavior
+where the RFC and WHATWG models overlap. Cases that depend on WHATWG recovery
+or special-host policy are not treated as RFC conformance failures.
 
-Percent-encoding is **intentionally non-idempotent** by design.  A `%2F` in a
-URL path is a *literal encoded slash* — semantically different from `/`, which is
-a path separator:
+The underlying `fluent-uri` and ICU libraries provide RFC 3986/3987 and
+UTS #46 conformance respectively. Wrest's focused tests cover the policy and
+integration behavior it adds around those libraries.
 
-```
-/api/v1/a%2Fb        ← 3 segments: "api", "v1", "a/b"
-/api/v1/a/b          ← 4 segments: "api", "v1", "a", "b"
-```
+## Wrest Implementation
 
-If a parser decoded `%2F` to `/` and then re-encoded, the URL would change from
-3 segments to 4 — the meaning is destroyed.  This is why the WHATWG standard
-**never** decodes-then-re-encodes URL components.  It only encodes *raw* unsafe
-bytes while preserving existing `%XX` sequences.
+Wrest uses:
 
-### WHATWG percent-encode sets
+1. [`fluent-uri`](https://docs.rs/fluent-uri) for RFC parsing, component
+   validation, and reference resolution;
+2. Windows system ICU for nontransitional UTS #46 processing of Unicode
+   registered names; and
+3. WinHTTP for transport after the URL has been separated into host, port,
+   path, and query.
 
-The WHATWG standard defines component-specific sets of bytes that must be
-percent-encoded (§1.3).  Each set is a superset of the C0 control percent-encode
-set (bytes 0x00–0x1F and >0x7E):
+Wrest deliberately implements the established RFC model used by protocol and
+server-side software rather than WHATWG's additional browser recovery. For
+the conventional HTTP(S) forms shared by both models, component and request
+behavior align. Wrest preserves existing percent escapes in path, query, and
+fragment components and distinguishes empty query and fragment components from
+absent ones. Registered-name host escapes are decoded and checked against
+`fluent-uri`'s rules before Wrest rebuilds the URL.
 
-| Encode set | Additional bytes encoded | Used for |
-|------------|------------------------|----------|
-| **C0 control** | (base set) | Opaque paths |
-| **Fragment** | SPACE `"` `<` `>` `` ` `` | Fragment |
-| **Query** | SPACE `"` `#` `<` `>` | Query (non-special schemes) |
-| **Special-query** | Query set + `'` | Query (http, https, etc.) |
-| **Path** | Query set + `?` `^` `` ` `` `{` `}` | Path |
-| **Userinfo** | Path set + `/` `:` `;` `=` `@` `[` `\` `]` `|` | Username, password |
+Unicode domains are converted lazily with system ICU. If ICU is unavailable,
+Unicode domain parsing returns `ParseError::IdnaError`. ASCII registered names
+bypass ICU, including `xn--` spellings that WHATWG would validate as A-labels.
 
-**Key property**: none of these sets (as used by the URL parser) include `%`
-itself.  This means existing `%XX` sequences pass through untouched — there is
-no double-encoding.  The WHATWG spec explicitly notes:
+Wrest sanitizes userinfo during parsing: accessors expose decoded credentials,
+and serialized URLs omit them. Request construction converts the credentials
+into `Authorization: Basic`. Reqwest reaches the same request behavior but
+retains encoded userinfo in `url::Url` until it builds the request.
 
-> "Of the possible values for the percentEncodeSet argument only two end up
-> encoding U+0025 (%) and thus give round-trippable data: component
-> percent-encode set and application/x-www-form-urlencoded percent-encode set.
-> The other values — which happen to be used by the URL parser — leave U+0025 (%)
-> untouched."
+The native URL type accepts only `http` and `https` because WinHTTP is the
+transport.
 
-## WHATWG Test Suite vs WinHTTP
+### Platform API Choices
 
-The WHATWG
-[`urltestdata.json`](https://github.com/web-platform-tests/wpt/blob/master/url/resources/urltestdata.json)
-contains 984 test cases.  Filtering to absolute `http://` and `https://` URLs
-without base URL resolution yields 263 applicable test cases.
+`WinHttpCrackUrl` is not used for parsing because it does not validate URL
+syntax, resolve references, or perform IDNA processing. Its encoding flags
+also either decode existing escapes or escape the percent sign again.
 
-Every RFC-3986-valid URL in the test suite is correctly parsed by WinHTTP.  The
-divergences are entirely in how each handles **invalid or edge-case input**:
-
-### WinHTTP is more accepting than WHATWG (145 cases)
-
-These are URLs that WHATWG **rejects** but WinHTTP **accepts**.  WinHTTP's
-permissiveness here extends into territory that both RFC 3986 and WHATWG consider
-invalid.
-
-| Category | Count | Examples |
-|----------|-------|---------|
-| Forbidden host code points (literal C0 controls) | 34 | `http://a\x01b/` |
-| Forbidden host code points (percent-encoded, decoded by WHATWG before host validation) | 32 | `http://ho%00st/`, `http://ho%20st/` |
-| IPv4 overflow, octal, trailing dot | 16 | `https://256.0.0.1/`, `http://1.2.3.08` |
-| Numeric-suffix hosts (WHATWG tries IPv4 parse, fails) | 12 | `http://foo.1.2.3.4`, `http://foo.09` |
-| Brackets around non-IPv6 host | 10 | `http://[www.google.com]/` |
-| Degenerate URLs (empty host, `?`-only, `#`-only, `///`) | 8 | `http://?`, `http://#`, `https:///` |
-| Invalid IDNA / punycode | 7 | `http://a.b.c.xn--pokxncvks` |
-| Raw forbidden chars in host | 7 | `http://a<b`, `http://a>b`, `http://a b/` |
-| Missing host after credentials | 5 | `http://user:pass@/`, `http://@/www.example.com` |
-| Unicode / replacement char in host | 5 | `https://💩.123/`, `https://\uFFFD` |
-| Other (port-with-no-host, soft hyphen) | 9 | `http://@:www.example.com`, `https://%C2%AD/` |
-
-### WinHTTP is more restrictive than WHATWG (28 cases)
-
-These are URLs that WHATWG **accepts** (as error recovery for invalid input) but
-WinHTTP **rejects** or **misparses**.
-
-| Category | Count | Fixable? | Examples |
-|----------|-------|----------|---------|
-| Dot-segment resolution not performed | 15 | ✅ post-process | `/foo/bar/../ton` → should be `/foo/ton` |
-| `%2e` / `%2E` not treated as dot-segment | 5 | ✅ pre-process | `/foo/%2e` → should be `/foo/` |
-| Scheme-only URLs (no `//`) | 4 | ⚠ heuristic | `http:example.com/` → should resolve |
-| Tab/newline not stripped | 2 | ✅ pre-process | `h\tt\np://host/` → should be `http://host/` |
-| Backslash not normalized to slash | 1 | ✅ pre-process | `http:\\host\path` → should be `http://host/path` |
-| NUL byte truncation | 1 | ❌ C-API limit | `https://x/\0y` → should be `https://x/%00y` |
-
-23 of 28 cases are formally fixable with pre/post-processing around WinHTTP.
-4 require heuristics (scheme-only URLs are arguably relative URL resolution,
-which is out of scope for an HTTP client).  1 is a fundamental C-API limitation.
+Wrest does not fall back to Win32 `IdnToAscii`: it maps `faß.de` to `fass.de`,
+while UTS #46 maps it to `xn--fa-hia.de`. Those are different destinations.

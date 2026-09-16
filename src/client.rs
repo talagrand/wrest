@@ -165,20 +165,10 @@ impl Client {
     pub async fn execute(&self, request: request::Request) -> Result<Response, Error> {
         use retry::Action;
 
-        let policy = &self.inner.retry_policy;
-
         // Ensure we always deposit a token when the execution finishes,
         // regardless of which exit path is taken (success, error, or panic).
         // The budget tracks throughput (requests we chose not to retry).
-        struct DepositGuard<'a> {
-            policy: &'a retry::Policy,
-        }
-        impl<'a> Drop for DepositGuard<'a> {
-            fn drop(&mut self) {
-                self.policy.deposit();
-            }
-        }
-        let _guard = DepositGuard { policy };
+        let policy = scopeguard::guard(&self.inner.retry_policy, |policy| policy.deposit());
 
         let max = policy.max_retries();
 
@@ -216,7 +206,7 @@ impl Client {
             // Try to clone the body. If we can't (e.g. streaming body),
             // or if we're out of retries, we consume the original body
             // and this becomes the final attempt.
-            // Note: For in-memory bodies, `try_clone()` is very cheap — it's
+            // Note: For in-memory bodies, `try_clone()` is very cheap - it's
             // just a reference count bump via the `bytes` crate.
             let (body_to_send, can_retry) = if remaining_retries > 0 {
                 match &body {
@@ -257,7 +247,7 @@ impl Client {
         }
     }
 
-    /// Inner execution — a single request attempt (no retry logic).
+    /// Inner execution - a single request attempt (no retry logic).
     async fn execute_inner(
         &self,
         url: &Url,
@@ -451,7 +441,7 @@ impl ClientBuilder {
     /// the full total timeout to expire.  Maps to WinHTTP's
     /// `nSendTimeout` parameter in `WinHttpSetTimeouts`.
     ///
-    /// Default: **no timeout** (infinite), matching hyper/tokio behaviour.
+    /// Default: **no timeout** (infinite), matching hyper/tokio behavior.
     /// For end-to-end control use [`timeout()`](Self::timeout) instead.
     ///
     /// WinHTTP represents phase timeouts in whole milliseconds, so zero and
@@ -474,7 +464,7 @@ impl ClientBuilder {
     /// total timeout to expire.  Maps to WinHTTP's `nReceiveTimeout`
     /// parameter in `WinHttpSetTimeouts`.
     ///
-    /// Default: **no timeout** (infinite), matching hyper/tokio behaviour.
+    /// Default: **no timeout** (infinite), matching hyper/tokio behavior.
     /// For end-to-end control use [`timeout()`](Self::timeout) instead.
     ///
     /// WinHTTP represents phase timeouts in whole milliseconds, so zero and
@@ -1026,7 +1016,7 @@ impl ClientBuilder {
         let connect_timeout_ms = self.connect_timeout.map_or(60_000, winhttp_timeout_ms); // 60s default
 
         // send/receive stall timeouts -- default 0 (infinite, no stall
-        // detection) to match hyper/tokio behaviour where reqwest has no
+        // detection) to match hyper/tokio behavior where reqwest has no
         // per-operation idle timeout.  Callers can opt in to stall
         // detection via the send_timeout() / read_timeout() extensions.
         // Total end-to-end timeout is enforced separately via
