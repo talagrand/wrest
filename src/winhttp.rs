@@ -1276,7 +1276,7 @@ pub(crate) async fn execute_request(
     })
 }
 
-/// Write a data buffer via `WinHttpWriteData` and await the `WriteComplete` callback.
+/// Write the complete data buffer, honoring short `WRITE_COMPLETE` callbacks.
 ///
 /// `data_ptr` is a `usize` pointer into a buffer that outlives the async
 /// operation (typically stored in `state.send_body` for cancellation safety).
@@ -1288,16 +1288,82 @@ async fn write_data(
     data_ptr: usize,
     data_len: usize,
     url: &Url,
-) -> Result<u32, Error> {
-    let data_len_u32 =
-        u32::try_from(data_len).map_err(|_| Error::body("WinHTTP write buffer exceeds 4 GiB"))?;
-    let h = handle.as_send();
-    await_win32(signal, move || {
-        let ptr = data_ptr as *const std::ffi::c_void;
-        abi::winhttp_write_data(h.as_mut_ptr(), ptr, data_len_u32).url_context(url)
+) -> Result<(), Error> {
+    let send_handle = handle.as_send();
+    write_data_with(data_ptr, data_len, url, |ptr, remaining_u32| {
+        let h = send_handle;
+        async move {
+            await_win32(signal, move || {
+                abi::winhttp_write_data(
+                    h.as_mut_ptr(),
+                    ptr as *const std::ffi::c_void,
+                    remaining_u32,
+                )
+                .url_context(url)
+            })
+            .await?
+            .into_write_complete(url)
+        }
     })
-    .await?
-    .into_write_complete(url)
+    .await
+}
+
+async fn write_data_with<F, Fut>(
+    data_ptr: usize,
+    data_len: usize,
+    url: &Url,
+    mut write_once: F,
+) -> Result<(), Error>
+where
+    F: FnMut(usize, u32) -> Fut,
+    Fut: std::future::Future<Output = Result<u32, Error>>,
+{
+    let mut offset = 0usize;
+    while offset < data_len {
+        let remaining = data_len
+            .checked_sub(offset)
+            .ok_or_else(|| Error::body("WinHTTP write offset exceeds buffer length"))
+            .url_context(url)?;
+        let ptr = data_ptr
+            .checked_add(offset)
+            .ok_or_else(|| Error::body("WinHTTP write pointer overflow"))
+            .url_context(url)?;
+        let remaining_u32 = u32::try_from(remaining)
+            .map_err(|_| Error::body("WinHTTP write buffer exceeds 4 GiB"))
+            .url_context(url)?;
+        let written = write_once(ptr, remaining_u32).await.url_context(url)? as usize;
+        offset = advance_write_offset(offset, data_len, written, url)?;
+    }
+    Ok(())
+}
+
+fn advance_write_offset(
+    offset: usize,
+    total_len: usize,
+    bytes_written: usize,
+    url: &Url,
+) -> Result<usize, Error> {
+    let remaining = total_len
+        .checked_sub(offset)
+        .ok_or_else(|| Error::body("WinHTTP write offset exceeds buffer length"))
+        .url_context(url)?;
+    if bytes_written == 0 {
+        return Err(Error::body(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            "WinHTTP completed a non-empty write without writing data",
+        )))
+        .url_context(url);
+    }
+    if bytes_written > remaining {
+        return Err(Error::body(format!(
+            "WinHTTP reported {bytes_written} bytes written for a {remaining}-byte buffer",
+        )))
+        .url_context(url);
+    }
+    offset
+        .checked_add(bytes_written)
+        .ok_or_else(|| Error::body("WinHTTP write offset overflow"))
+        .url_context(url)
 }
 
 /// Read a chunk of the response body.
@@ -1892,6 +1958,80 @@ mod tests {
             // Timeout variant -> is_timeout error
             let err = method(CallbackEvent::Win32Error(ERROR_WINHTTP_TIMEOUT), &url).unwrap_err();
             assert!(err.is_timeout(), "{label}: timeout variant");
+        }
+    }
+
+    fn run_scripted_writes(
+        data_ptr: usize,
+        data_len: usize,
+        url: &Url,
+        completions: &[u32],
+    ) -> (Result<(), Error>, Vec<(usize, u32)>) {
+        let mut completions = completions.iter().copied();
+        let mut calls = Vec::new();
+        let result =
+            futures_executor::block_on(write_data_with(data_ptr, data_len, url, |ptr, len| {
+                calls.push((ptr, len));
+                std::future::ready(Ok(completions.next().expect("unexpected extra write")))
+            }));
+        assert_eq!(completions.next(), None, "unused scripted completion");
+        (result, calls)
+    }
+
+    #[test]
+    fn write_data_retries_unwritten_suffix() {
+        let url: Url = "https://example.com/upload".parse().unwrap();
+        let base_ptr = 0x1000usize;
+        let (result, calls) = run_scripted_writes(base_ptr, 10, &url, &[4, 6]);
+
+        result.unwrap();
+        assert_eq!(calls, [(base_ptr, 10), (base_ptr + 4, 6)]);
+    }
+
+    #[test]
+    fn write_data_rejects_invalid_completion_counts() {
+        use std::error::Error as _;
+
+        let url: Url = "https://example.com/upload".parse().unwrap();
+
+        let (zero, _) = run_scripted_writes(0x1000, 10, &url, &[0]);
+        let zero = zero.unwrap_err();
+        assert!(zero.is_body());
+        assert_eq!(zero.url(), Some(&url));
+        let source = zero
+            .source()
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .expect("zero write should retain io::Error source");
+        assert_eq!(source.kind(), std::io::ErrorKind::WriteZero);
+
+        let (overreported, _) = run_scripted_writes(0x1000, 10, &url, &[11]);
+        let overreported = overreported.unwrap_err();
+        assert!(overreported.is_body());
+        assert_eq!(overreported.url(), Some(&url));
+        assert!(error_chain_text(&overreported).contains("11 bytes written"));
+
+        let invalid_offset = advance_write_offset(11, 10, 1, &url).unwrap_err();
+        assert!(invalid_offset.is_body());
+        assert_eq!(invalid_offset.url(), Some(&url));
+        assert!(error_chain_text(&invalid_offset).contains("offset exceeds"));
+    }
+
+    #[test]
+    fn write_data_normalizes_overflow_errors() {
+        let url: Url = "https://example.com/upload".parse().unwrap();
+        let (pointer_overflow, calls) = run_scripted_writes(usize::MAX, 2, &url, &[1]);
+        let pointer_overflow = pointer_overflow.unwrap_err();
+        assert_eq!(calls, [(usize::MAX, 2)]);
+        assert_eq!(pointer_overflow.url(), Some(&url));
+        assert!(error_chain_text(&pointer_overflow).contains("pointer overflow"));
+
+        #[cfg(target_pointer_width = "64")]
+        {
+            let (oversized, calls) = run_scripted_writes(0x1000, u32::MAX as usize + 1, &url, &[]);
+            let oversized = oversized.unwrap_err();
+            assert!(calls.is_empty());
+            assert_eq!(oversized.url(), Some(&url));
+            assert!(error_chain_text(&oversized).contains("exceeds 4 GiB"));
         }
     }
 

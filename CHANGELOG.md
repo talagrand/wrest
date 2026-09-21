@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - DLL load: load system icu.dll from system32 to prevent dll planting.
 - HTTP Timeouts: keep explicit zero and positive sub-millisecond phase timeouts finite by clamping/rounding to 1ms.
 - Parsing: replace ad hoc Content-Type parsing with `mime` crate for more precise edge-case handling.
+- Request bodies: retry unwritten bytes after partial `WinHttpWriteData` success.
 
 ### Changed
 - CI - Supply chain: SHA-pin all external actions in CI.
