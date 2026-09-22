@@ -240,8 +240,8 @@ impl Response {
 
     /// Read the entire response body as a string.
     ///
-    /// If the `Content-Type` header contains a `charset` parameter, that
-    /// encoding is used; otherwise UTF-8 is assumed.
+    /// A leading BOM takes priority; otherwise the `Content-Type` header's
+    /// `charset` parameter is used, falling back to UTF-8.
     ///
     /// UTF-8 takes a fast pure-Rust path. All other charsets are decoded
     /// via Win32 `MultiByteToWideChar` following the WHATWG Encoding
@@ -267,8 +267,8 @@ impl Response {
 
     /// Read the entire response body, decoding with the given charset.
     ///
-    /// The `Content-Type` charset takes priority; `default_encoding` is
-    /// used only when the header does not specify one.
+    /// A leading BOM takes priority; the `Content-Type` charset comes next,
+    /// and `default_encoding` is used only when neither applies.
     ///
     /// UTF-8 takes a fast pure-Rust path. All other charsets are decoded
     /// via Win32 `MultiByteToWideChar` following the WHATWG Encoding

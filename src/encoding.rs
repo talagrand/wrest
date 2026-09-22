@@ -76,14 +76,18 @@ pub(crate) fn decode_body(data: &[u8], charset: &str) -> Result<String, Error> {
         return Ok(String::new());
     }
 
-    let label = normalize_label(charset);
+    // A BOM overrides the declared label
+    // FF FE 00 00 is UTF-32LE's BOM, which WHATWG decodes as UTF-16LE.
+    let (data, label) = match data {
+        [0xEF, 0xBB, 0xBF, rest @ ..] => (rest, String::from("utf-8")),
+        [0xFF, 0xFE, rest @ ..] => (rest, String::from("utf-16le")),
+        [0xFE, 0xFF, rest @ ..] => (rest, String::from("utf-16be")),
+        _ => (data, normalize_label(charset)),
+    };
 
     // -- UTF-8 fast path ----------------------------------------------
     if is_utf8_label(&label) {
         trace!(label = charset, "charset: UTF-8 fast path");
-        // Strip the UTF-8 BOM (EF BB BF) if present, matching
-        // reqwest / encoding_rs behaviour.
-        let data = data.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(data);
         return Ok(match String::from_utf8(data.to_vec()) {
             Ok(s) => s,
             Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
@@ -409,8 +413,6 @@ fn decode_iso_8859_16(data: &[u8]) -> String {
 
 /// Decode a UTF-16LE byte stream.
 fn decode_utf16le(data: &[u8]) -> Result<String, Error> {
-    // Strip BOM if present
-    let data = data.strip_prefix(&[0xFF, 0xFE]).unwrap_or(data);
     let (pairs, rest) = data.as_chunks::<2>();
     if !rest.is_empty() {
         return Err(Error::decode("invalid UTF-16LE: odd byte count"));
@@ -421,7 +423,6 @@ fn decode_utf16le(data: &[u8]) -> Result<String, Error> {
 
 /// Decode a UTF-16BE byte stream.
 fn decode_utf16be(data: &[u8]) -> Result<String, Error> {
-    let data = data.strip_prefix(&[0xFE, 0xFF]).unwrap_or(data);
     let (pairs, rest) = data.as_chunks::<2>();
     if !rest.is_empty() {
         return Err(Error::decode("invalid UTF-16BE: odd byte count"));
@@ -557,6 +558,23 @@ mod tests {
             // UTF-8 BOM handling
             (&[0xEF, 0xBB, 0xBF, b'h', b'i'], "utf-8", "hi", "UTF-8 BOM stripped"),
             (&[0xEF, 0xBB, 0xBF], "utf-8", "", "UTF-8 BOM only"),
+            // A BOM overrides the declared label (WHATWG decode, encoding_rs).
+            (&[0xFF, 0xFE, 0x41, 0x00], "utf-8", "A", "UTF-16LE BOM beats utf-8 label"),
+            (&[0xFE, 0xFF, 0x00, 0x41], "utf-8", "A", "UTF-16BE BOM beats utf-8 label"),
+            (&[0xEF, 0xBB, 0xBF, b'h', b'i'], "windows-1252", "hi", "UTF-8 BOM beats 1252 label"),
+            (&[0xFE, 0xFF, 0x00, 0x41], "utf-16le", "A", "BE BOM beats utf-16le label"),
+            (&[0xFF, 0xFE, 0x41, 0x00], "totally-bogus", "A", "BOM beats unknown label"),
+            // The sniffed BOM is consumed once; a literal U+FEFF after it survives.
+            (
+                &[0xEF, 0xBB, 0xBF, 0xEF, 0xBB, 0xBF, b'h', b'i'],
+                "utf-8",
+                "\u{FEFF}hi",
+                "UTF-8 BOM then U+FEFF",
+            ),
+            (&[0xFF, 0xFE, 0xFF, 0xFE, 0x41, 0x00], "utf-16le", "\u{FEFF}A", "LE BOM then U+FEFF"),
+            (&[0xFE, 0xFF, 0xFE, 0xFF, 0x00, 0x41], "utf-16be", "\u{FEFF}A", "BE BOM then U+FEFF"),
+            // FF FE 00 00 is UTF-32LE's BOM; WHATWG sniffs it as UTF-16LE.
+            (&[0xFF, 0xFE, 0x00, 0x00], "utf-8", "\u{0}", "UTF-32LE BOM is UTF-16LE"),
             // UTF-8 lossy fallback for invalid bytes
             (b"hi\xFFlo", "utf-8", "hi\u{FFFD}lo", "UTF-8 invalid byte → U+FFFD"),
             // Empty data always returns empty string
@@ -625,6 +643,9 @@ mod tests {
             // BOM stripping leaves odd remainder → still invalid.
             ("utf-16le", &[0xFF, 0xFE, 0x42], "LE BOM + odd remainder"),
             ("utf-16be", &[0xFE, 0xFF, 0x00], "BE BOM + odd remainder"),
+            // A sniffed BOM routes any label to the UTF-16 decoder, fatal path included.
+            ("utf-8", &[0xFF, 0xFE, 0x41], "sniffed LE + odd remainder"),
+            ("utf-8", &[0xFE, 0xFF, 0x41], "sniffed BE + odd remainder"),
         ];
 
         for &(charset, data, desc) in cases {
