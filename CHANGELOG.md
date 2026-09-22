@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to Semantic Versioning.
 
+## Unreleased
+
+### Changed
+- CI - Supply chain: SHA-pin all external actions in CI.
+
 ## 0.5.7
 
 ### Fixed
@@ -124,4 +129,3 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Initial public release of `wrest`.
 - Windows-native async HTTP client backed by WinHTTP.
 - Reqwest-compatible core API (`Client`, `RequestBuilder`, `Response`, error model, and key feature flags).
-

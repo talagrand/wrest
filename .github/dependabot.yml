@@ -21,7 +21,9 @@ updates:
 
   # Enable version updates for GitHub Actions
   - package-ecosystem: "github-actions"
-    directory: "/"
+    directories:
+      - "/"
+      - "/.github/actions/start-httpbin"
     schedule:
       interval: "monthly"
     open-pull-requests-limit: 5
