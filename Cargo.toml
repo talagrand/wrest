@@ -210,7 +210,7 @@ windows-sys = { version = ">=0.59, <0.62", default-features = false, features = 
 futures-channel = "0.3.31"
 futures-util = "0.3.31"
 futures-executor = "0.3.31"
-base64 = "0.22"
+base64 = "0.23"
 
 # On non-Windows platforms, reqwest is used as the HTTP passthrough.
 [target.'cfg(not(windows))'.dependencies]
@@ -222,7 +222,7 @@ tokio = { version = "1.44.2", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-base64 = "0.22"
+base64 = "0.23"
 futures-util = "0.3.31"
 futures-timer = "3"
 clap = { version = "4", features = ["derive"] }
