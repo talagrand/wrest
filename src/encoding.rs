@@ -411,26 +411,22 @@ fn decode_iso_8859_16(data: &[u8]) -> String {
 fn decode_utf16le(data: &[u8]) -> Result<String, Error> {
     // Strip BOM if present
     let data = data.strip_prefix(&[0xFF, 0xFE]).unwrap_or(data);
-    if !data.len().is_multiple_of(2) {
+    let (pairs, rest) = data.as_chunks::<2>();
+    if !rest.is_empty() {
         return Err(Error::decode("invalid UTF-16LE: odd byte count"));
     }
-    let words: Vec<u16> = data
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect();
+    let words: Vec<u16> = pairs.iter().map(|c| u16::from_le_bytes(*c)).collect();
     string_from_utf16(&words, "invalid UTF-16LE")
 }
 
 /// Decode a UTF-16BE byte stream.
 fn decode_utf16be(data: &[u8]) -> Result<String, Error> {
     let data = data.strip_prefix(&[0xFE, 0xFF]).unwrap_or(data);
-    if !data.len().is_multiple_of(2) {
+    let (pairs, rest) = data.as_chunks::<2>();
+    if !rest.is_empty() {
         return Err(Error::decode("invalid UTF-16BE: odd byte count"));
     }
-    let words: Vec<u16> = data
-        .chunks_exact(2)
-        .map(|c| u16::from_be_bytes([c[0], c[1]]))
-        .collect();
+    let words: Vec<u16> = pairs.iter().map(|c| u16::from_be_bytes(*c)).collect();
     string_from_utf16(&words, "invalid UTF-16BE")
 }
 
