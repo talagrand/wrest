@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## Unreleased
 
+### Added
+- Client certificates (`client-cert` feature): `tls::Identity` plus `ClientBuilder::identity()`, backed by `WINHTTP_OPTION_CLIENT_CERT_CONTEXT`. The certificate is referenced in the Windows store rather than imported from exported key material like `reqwest`.
+- `tls::list_client_certificates()` returns the certificates in a store that could be presented for mTLS authentication.
+
 ### Fixed
 - DLL load: load system icu.dll from system32 to prevent dll planting.
 - HTTP Timeouts: keep explicit zero and positive sub-millisecond phase timeouts finite by clamping/rounding to 1ms.
@@ -18,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - WinHTTP callbacks: prevent valid redirects from being rejected and DNS/server diagnostics from being truncated when decoding UTF-16 callback strings.
 - URL userinfo: preserve percent-encoded accessors and construct Basic authentication from exact decoded octets, including non-UTF-8 values and empty usernames; consumed credentials are removed from built request URLs.
 - Client certificates: a server that requests cert is answered with an empty cert for `reqwest` parity.
+- Client certificates: errors distinguish no certificate configured, a missing private key, and an inaccessible private key.
 
 ### Changed
 - CI - Supply chain: SHA-pin all external actions in CI.

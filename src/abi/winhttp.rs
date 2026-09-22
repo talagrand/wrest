@@ -143,6 +143,27 @@ pub(crate) fn winhttp_set_option_usize(
     }
 }
 
+/// `WinHttpSetOption(WINHTTP_OPTION_CLIENT_CERT_CONTEXT)`.
+///
+/// `lpBuffer` is the `CERT_CONTEXT` itself (not a pointer to the pointer),
+/// with `sizeof(CERT_CONTEXT)` as the length.  WinHTTP calls
+/// `CertDuplicateCertificateContext` while processing the option, so the
+/// caller keeps ownership of `ctx` and may release it independently.
+#[cfg(feature = "client-cert")]
+pub(crate) fn winhttp_set_client_cert(
+    handle: RawWinHttpHandle,
+    ctx: *const windows_sys::Win32::Security::Cryptography::CERT_CONTEXT,
+) -> Result<(), Error> {
+    unsafe {
+        check_win32_bool(WinHttpSetOption(
+            handle,
+            WINHTTP_OPTION_CLIENT_CERT_CONTEXT,
+            ctx.cast(),
+            super::dword_size_of::<windows_sys::Win32::Security::Cryptography::CERT_CONTEXT>(),
+        ))
+    }
+}
+
 /// `WinHttpSetOption(WINHTTP_OPTION_PROXY)` -- override to direct (no proxy).
 pub(crate) fn winhttp_set_proxy_direct(handle: RawWinHttpHandle) -> Result<(), Error> {
     let info = WINHTTP_PROXY_INFO {

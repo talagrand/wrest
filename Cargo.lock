@@ -2450,6 +2450,7 @@ dependencies = [
 name = "wrest"
 version = "0.5.7"
 dependencies = [
+ "aws-lc-rs",
  "base64 0.23.1",
  "bytes",
  "clap",

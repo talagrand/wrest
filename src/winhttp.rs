@@ -17,6 +17,7 @@ use crate::{
 use bytes::BytesMut;
 use http::{StatusCode, Version};
 use std::{
+    borrow::Cow,
     mem::size_of,
     sync::{
         Arc, Condvar, Mutex,
@@ -922,7 +923,7 @@ pub(crate) async fn execute_request(
     headers: &[(String, String)],
     body: Option<Body>,
     proxy_config: &ProxyConfig,
-    accept_invalid_certs: bool,
+    tls: &crate::tls::TlsConfig,
 ) -> Result<RawResponse, Error> {
     // Check per-request NO_PROXY override
     let per_request_proxy = proxy_config.resolve(&url.host, url.is_https);
@@ -1016,15 +1017,24 @@ pub(crate) async fn execute_request(
         }
     }
 
-    // Answer a client-certificate request instead of failing.  Without
-    // this WinHTTP returns ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED and never
-    // sends the request.
+    // Present a configured client certificate.  Without an identity, answer
+    // the request with none: WinHTTP otherwise returns
+    // ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED and never sends the request.
     if url.is_https {
+        #[cfg(feature = "client-cert")]
+        if let Some(identity) = &tls.identity {
+            abi::winhttp_set_client_cert(request_handle.raw(), identity.as_ptr())
+                .url_context(url)?;
+        } else {
+            abi::winhttp_set_no_client_cert(request_handle.raw()).url_context(url)?;
+        }
+
+        #[cfg(not(feature = "client-cert"))]
         abi::winhttp_set_no_client_cert(request_handle.raw()).url_context(url)?;
     }
 
     // Set this on HTTP handles too: WinHTTP reuses it for HTTPS redirects.
-    if accept_invalid_certs {
+    if tls.accept_invalid_certs {
         let security_flags: u32 = SECURITY_FLAG_IGNORE_UNKNOWN_CA
             | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
             | SECURITY_FLAG_IGNORE_CERT_CN_INVALID
@@ -1328,16 +1338,24 @@ impl CertlessRedirectRetry {
     }
 
     fn is_client_cert_needed(err: &Error) -> bool {
-        err.is_connect()
-            && err
-                .inner
-                .source
-                .as_deref()
-                .and_then(|source| source.downcast_ref::<std::io::Error>())
-                .is_some_and(|source| {
-                    source.raw_os_error()
-                        == Some(ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED.cast_signed())
-                })
+        use std::error::Error as _;
+
+        if !err.is_connect() {
+            return false;
+        }
+        // Walk the chain: the explanation added for this code wraps the
+        // io::Error in a ContextError, so it is not always the direct source.
+        let mut cur = err.source();
+        while let Some(e) = cur {
+            if let Some(io_err) = e.downcast_ref::<std::io::Error>()
+                && io_err.raw_os_error()
+                    == Some(ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED.cast_signed())
+            {
+                return true;
+            }
+            cur = e.source();
+        }
+        false
     }
 
     /// Resend the existing HTTPS-redirected handle once, never the original HTTP URL.
@@ -1662,15 +1680,30 @@ fn callback_error_to_error(code: u32, state: &RequestState, url: &Url) -> Error 
     let mut err = Error::from_win32(code);
     err.inner.url = Some(Box::new(url.clone()));
 
-    // Enrich TLS errors with captured failure flags
-    if code == ERROR_WINHTTP_SECURE_FAILURE {
-        // Acquire: pairs with the Release store in the SECURE_FAILURE callback.
-        let tls_flags = state.tls_failure_flags.load(Ordering::Acquire);
-        let detail = describe_tls_failure(tls_flags);
-        if let Some(source) = err.inner.source.take() {
-            err.inner.source =
-                Some(Box::new(ContextError::new(format!("TLS error: {detail}"), source)));
+    // Explain the failure where the bare Win32 message is unhelpfully terse.
+    let detail: Option<Cow<'static, str>> = match code {
+        ERROR_WINHTTP_SECURE_FAILURE => {
+            // Acquire: pairs with the Release store in the SECURE_FAILURE callback.
+            let flags = state.tls_failure_flags.load(Ordering::Acquire);
+            Some(format!("TLS error: {}", describe_tls_failure(flags)).into())
         }
+        ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED | ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED_PROXY => {
+            Some("the server requires a client certificate; none was configured".into())
+        }
+        ERROR_WINHTTP_CLIENT_CERT_NO_PRIVATE_KEY => Some(
+            "the client certificate has no private key; it may have been removed from the store"
+                .into(),
+        ),
+        ERROR_WINHTTP_CLIENT_CERT_NO_ACCESS_PRIVATE_KEY => {
+            Some("the client certificate's private key is not accessible".into())
+        }
+        _ => None,
+    };
+
+    if let Some(detail) = detail
+        && let Some(source) = err.inner.source.take()
+    {
+        err.inner.source = Some(Box::new(ContextError::new(detail, source)));
     }
 
     err
@@ -1828,9 +1861,17 @@ mod tests {
         // 5 MiB body -- exceeds the 4 MiB #[cfg(test)] threshold.
         let body = Body::from(vec![b'X'; 5 * 1024 * 1024]);
 
-        let raw = execute_request(&session, &url, "POST", &[], Some(body), &proxy_config, false)
-            .await
-            .expect("large body request should succeed");
+        let raw = execute_request(
+            &session,
+            &url,
+            "POST",
+            &[],
+            Some(body),
+            &proxy_config,
+            &crate::tls::TlsConfig::default(),
+        )
+        .await
+        .expect("large body request should succeed");
 
         assert_eq!(raw.status, 200);
     }
@@ -1942,9 +1983,17 @@ mod tests {
                 .unwrap();
             let proxy_config = ProxyConfig::none();
 
-            let raw = execute_request(&session, &url, "GET", &[], None, &proxy_config, false)
-                .await
-                .unwrap_or_else(|e| panic!("{}: request failed: {e}", case.label));
+            let raw = execute_request(
+                &session,
+                &url,
+                "GET",
+                &[],
+                None,
+                &proxy_config,
+                &crate::tls::TlsConfig::default(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{}: request failed: {e}", case.label));
 
             assert_eq!(raw.status, case.expected_status, "{}", case.label);
         }
@@ -1994,9 +2043,17 @@ mod tests {
             .unwrap()
             .apply_to(&mut proxy_config);
 
-        let raw = execute_request(&session, &url, "GET", &[], None, &proxy_config, false)
-            .await
-            .expect("direct bypass request should succeed");
+        let raw = execute_request(
+            &session,
+            &url,
+            "GET",
+            &[],
+            None,
+            &proxy_config,
+            &crate::tls::TlsConfig::default(),
+        )
+        .await
+        .expect("direct bypass request should succeed");
 
         assert_eq!(raw.status, 200);
     }

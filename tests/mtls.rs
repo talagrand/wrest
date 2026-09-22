@@ -2,6 +2,11 @@
 //!
 //! Run locally with `cargo test --test mtls`; each test creates its own
 //! throwaway TLS certificate and loopback listener.
+//!
+//! The `client-cert` tests additionally need a certificate in
+//! `CurrentUser\MY`.  `.github/ci-tools/setup-test-certs.ps1` installs one
+//! and reports its thumbprint in `WREST_MTLS_THUMBPRINT`; without it they
+//! skip.
 
 #![cfg(native_winhttp)]
 #![expect(clippy::tests_outside_test_module)]
@@ -20,14 +25,26 @@ use tokio::{
 use tokio_rustls::{
     TlsAcceptor,
     rustls::{
-        RootCertStore, ServerConfig, pki_types::PrivatePkcs8KeyDer, server::WebPkiClientVerifier,
+        RootCertStore, ServerConfig,
+        pki_types::{CertificateDer, PrivatePkcs8KeyDer},
+        server::{WebPkiClientVerifier, danger::ClientCertVerifier},
     },
+};
+#[cfg(feature = "client-cert")]
+use tokio_rustls::rustls::{
+    DigitallySignedStruct, DistinguishedName, Error as TlsError, SignatureScheme,
+    client::danger::HandshakeSignatureValid,
+    crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature},
+    pki_types::UnixTime,
+    server::danger::ClientCertVerified,
 };
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
 };
 use wrest::{Client, StatusCode};
+#[cfg(feature = "client-cert")]
+use wrest::tls::{Identity, StoreLocation};
 
 struct TestServer {
     url: String,
@@ -37,6 +54,9 @@ struct TestServer {
 enum ClientCert {
     Optional,
     Required,
+    /// Accept whatever the client presents and report its thumbprint.
+    #[cfg(feature = "client-cert")]
+    AcceptAny,
 }
 
 enum Handshakes {
@@ -85,13 +105,23 @@ impl TestServer {
 
         let mut roots = RootCertStore::empty();
         roots.add(cert.der().clone()).expect("add test CA");
-        let verifier = WebPkiClientVerifier::builder(Arc::new(roots));
-        let verifier = match client_cert {
-            ClientCert::Optional => verifier.allow_unauthenticated(),
-            ClientCert::Required => verifier,
+        let verifier: Arc<dyn ClientCertVerifier> = match client_cert {
+            ClientCert::Optional => WebPkiClientVerifier::builder(Arc::new(roots))
+                .allow_unauthenticated()
+                .build()
+                .expect("build client cert verifier"),
+            ClientCert::Required => WebPkiClientVerifier::builder(Arc::new(roots))
+                .build()
+                .expect("build client cert verifier"),
+            // A store certificate has no trust path to the per-run CA, so
+            // the assertion is which certificate arrived, not its chain.
+            #[cfg(feature = "client-cert")]
+            ClientCert::AcceptAny => Arc::new(AcceptAnyClientCert(Arc::clone(
+                CryptoProvider::get_default().expect("a default rustls crypto provider"),
+            ))),
         };
         let config = ServerConfig::builder()
-            .with_client_cert_verifier(verifier.build().expect("build client cert verifier"))
+            .with_client_cert_verifier(verifier)
             .with_single_cert(
                 vec![cert.der().clone()],
                 PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
@@ -132,15 +162,9 @@ impl TestServer {
             }
 
             let mut tls = handshake.expect("accept optional client cert handshake");
-            let body = if tls
-                .get_ref()
-                .1
-                .peer_certificates()
-                .is_some_and(|certs| !certs.is_empty())
-            {
-                "present"
-            } else {
-                "none"
+            let body = match tls.get_ref().1.peer_certificates() {
+                Some([end_entity, ..]) => peer_label(end_entity),
+                _ => "none".to_owned(),
             };
             let mut request = Vec::new();
             while !request.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -275,4 +299,158 @@ fn an_http_redirect_to_required_client_certificate_still_fails() {
         assert!(err.is_connect(), "expected a connect failure, got: {err:?}");
         assert_one_redirect(&redirect).await;
     });
+}
+
+/// Label the certificate the server received: its SHA-1 thumbprint, the
+/// form `Identity::from_windows_store()` selects by.
+#[cfg(feature = "client-cert")]
+fn peer_label(cert: &CertificateDer<'_>) -> String {
+    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY, cert);
+    hex_encode(digest.as_ref())
+}
+
+#[cfg(not(feature = "client-cert"))]
+fn peer_label(_cert: &CertificateDer<'_>) -> String {
+    "present".to_owned()
+}
+
+/// Accepts any client certificate: a certificate from the Windows store has
+/// no trust path to the per-run CA, and the assertion is which certificate
+/// SChannel presented.
+#[cfg(feature = "client-cert")]
+#[derive(Debug)]
+struct AcceptAnyClientCert(Arc<CryptoProvider>);
+
+#[cfg(feature = "client-cert")]
+impl ClientCertVerifier for AcceptAnyClientCert {
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, TlsError> {
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// Parse 40 hex characters into a SHA-1 thumbprint.  Windows reports
+/// thumbprints in uppercase; accept either case.
+#[cfg(feature = "client-cert")]
+fn parse_thumbprint(hex: &str) -> Option<[u8; 20]> {
+    let hex = hex.trim();
+    if hex.len() != 40 {
+        return None;
+    }
+    let (pairs, remainder) = hex.as_bytes().as_chunks::<2>();
+    debug_assert!(remainder.is_empty(), "40 is even");
+
+    let mut out = [0u8; 20];
+    for (slot, pair) in out.iter_mut().zip(pairs) {
+        let pair = std::str::from_utf8(pair).ok()?;
+        *slot = u8::from_str_radix(pair, 16).ok()?;
+    }
+    Some(out)
+}
+
+#[cfg(feature = "client-cert")]
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len().saturating_mul(2)), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
+/// The thumbprint CI installed in `CurrentUser\MY`, or `None` to skip.
+#[cfg(feature = "client-cert")]
+fn ci_thumbprint() -> Option<[u8; 20]> {
+    let hex = std::env::var("WREST_MTLS_THUMBPRINT").ok()?;
+    let parsed = parse_thumbprint(&hex)
+        .unwrap_or_else(|| panic!("WREST_MTLS_THUMBPRINT is not 40 hex chars: {hex:?}"));
+    Some(parsed)
+}
+
+/// The server reports the thumbprint it received, so this asserts SChannel
+/// presented *our* certificate.
+#[cfg(feature = "client-cert")]
+#[test]
+fn client_certificate_is_presented_to_the_server() {
+    let Some(thumbprint) = ci_thumbprint() else {
+        eprintln!("skipping: WREST_MTLS_THUMBPRINT not set");
+        return;
+    };
+
+    TestServer::run(ClientCert::AcceptAny, async |server| {
+        let identity = Identity::from_windows_store(StoreLocation::CurrentUser, "MY", &thumbprint)
+            .expect("CI installs this certificate in CurrentUser\\MY");
+        let response = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .tls_danger_accept_invalid_certs(true)
+            .identity(identity)
+            .build()
+            .expect("client with identity should build")
+            .get(server.url.as_str())
+            .send()
+            .await
+            .expect("mutual-TLS handshake should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.text().await.expect("body should read").trim(),
+            hex_encode(&thumbprint),
+            "server saw a different certificate than the one configured"
+        );
+    });
+}
+
+/// The certificate CI installs must appear in the listing, and the
+/// listing's thumbprint must be the one the environment reports.
+#[cfg(feature = "client-cert")]
+#[test]
+fn ci_certificate_appears_in_the_listing() {
+    let Some(thumbprint) = ci_thumbprint() else {
+        eprintln!("skipping: WREST_MTLS_THUMBPRINT not set");
+        return;
+    };
+
+    let certs = wrest::tls::list_client_certificates(StoreLocation::CurrentUser, "MY")
+        .expect("CurrentUser\\MY should open");
+    let found = certs
+        .iter()
+        .find(|c| c.thumbprint == thumbprint)
+        .unwrap_or_else(|| {
+            let seen: Vec<_> = certs.iter().map(|c| c.thumbprint_hex()).collect();
+            panic!("installed certificate is missing from the listing; saw {seen:?}")
+        });
+
+    assert!(found.subject.contains("wrest-test-client"), "unexpected subject: {}", found.subject);
+    assert!(found.not_after > std::time::SystemTime::now(), "listed an expired certificate");
 }

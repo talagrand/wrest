@@ -49,6 +49,9 @@ pub mod retry;
 pub(crate) mod threadpool;
 #[cfg(native_winhttp)]
 mod timer;
+/// TLS configuration types.
+#[cfg(native_winhttp)]
+pub mod tls;
 #[cfg(native_winhttp)]
 pub(crate) mod url;
 #[cfg(native_winhttp)]
@@ -68,6 +71,9 @@ pub use proxy::{NoProxy, Proxy};
 pub use request::{Request, RequestBuilder};
 #[cfg(native_winhttp)]
 pub use response::Response;
+/// Client certificate for mutual TLS. Requires the `client-cert` feature.
+#[cfg(all(native_winhttp, feature = "client-cert"))]
+pub use tls::Identity;
 #[cfg(native_winhttp)]
 pub use url::{IntoUrl, ParseError, Url};
 
@@ -112,6 +118,26 @@ pub type ParseError = <reqwest::Url as std::str::FromStr>::Err;
 pub mod proxy {
     pub use reqwest::{NoProxy, Proxy};
 }
+
+/// Client certificate for mutual TLS.
+///
+/// On the passthrough this is reqwest's own type, so it is gated on
+/// reqwest's TLS features rather than on wrest's `client-cert`.
+#[cfg(all(
+    not(native_winhttp),
+    any(feature = "default-tls", feature = "native-tls")
+))]
+pub use reqwest::Identity;
+/// TLS configuration types.
+///
+/// reqwest gates its `tls` module behind its TLS features, so on the
+/// passthrough this exists only when `default-tls` or `native-tls` is
+/// enabled.  The native backend always exposes it.
+#[cfg(all(
+    not(native_winhttp),
+    any(feature = "default-tls", feature = "native-tls")
+))]
+pub use reqwest::tls;
 
 // ============================================================
 // Common re-exports (identical on native backend and reqwest passthrough)

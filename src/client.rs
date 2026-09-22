@@ -10,7 +10,7 @@ use crate::{
     proxy::{self, ProxyConfig},
     redirect,
     request::{self, RequestBuilder},
-    retry,
+    retry, tls,
     url::IntoUrl,
     util,
     winhttp::{self, SessionConfig, WinHttpSession},
@@ -55,8 +55,8 @@ pub(crate) struct ClientInner {
     pub proxy_config: ProxyConfig,
     /// Default headers applied to every request.
     pub default_headers: HeaderMap,
-    /// Whether to ignore certificate errors.
-    pub accept_invalid_certs: bool,
+    /// TLS configuration: certificate validation and client identity.
+    pub tls: tls::TlsConfig,
     /// Whether to restrict requests to HTTPS-only.
     pub https_only: bool,
     /// Whether the configured redirect policy allows following redirects
@@ -84,6 +84,8 @@ pub struct ClientBuilder {
     default_headers: HeaderMap,
     redirect_policy: Option<redirect::Policy>,
     tls_danger_accept_invalid_certs: bool,
+    #[cfg(feature = "client-cert")]
+    identity: Option<tls::Identity>,
     https_only: bool,
     http1_only: bool,
     error: Option<Error>,
@@ -291,7 +293,7 @@ impl Client {
                 headers,
                 body,
                 &inner.proxy_config,
-                inner.accept_invalid_certs,
+                &inner.tls,
             )
             .await
         };
@@ -382,6 +384,8 @@ impl ClientBuilder {
             default_headers: HeaderMap::new(),
             redirect_policy: None,
             tls_danger_accept_invalid_certs: false,
+            #[cfg(feature = "client-cert")]
+            identity: None,
             https_only: false,
             http1_only: false,
             error: None,
@@ -951,6 +955,26 @@ impl ClientBuilder {
         self.tls_danger_accept_invalid_certs(accept)
     }
 
+    /// Use a client certificate for mutual TLS.
+    ///
+    /// Requires the `client-cert` feature.  Applied to every HTTPS request
+    /// made through the resulting [`Client`] via
+    /// `WINHTTP_OPTION_CLIENT_CERT_CONTEXT`.
+    ///
+    /// # Deviation from reqwest
+    ///
+    /// Same name and signature as
+    /// [`reqwest::ClientBuilder::identity()`](https://docs.rs/reqwest/latest/reqwest/struct.ClientBuilder.html#method.identity),
+    /// but [`tls::Identity`](crate::tls::Identity) is built from a
+    /// certificate already in the Windows store rather than from exported
+    /// key material.
+    #[cfg(feature = "client-cert")]
+    #[must_use]
+    pub fn identity(mut self, identity: tls::Identity) -> Self {
+        self.identity = Some(identity);
+        self
+    }
+
     /// Restrict the client to HTTPS-only requests.
     ///
     /// When enabled, any request to an `http://` URL will return an
@@ -1059,7 +1083,11 @@ impl ClientBuilder {
                 total_timeout: self.timeout,
                 proxy_config,
                 default_headers: self.default_headers,
-                accept_invalid_certs: self.tls_danger_accept_invalid_certs,
+                tls: tls::TlsConfig {
+                    accept_invalid_certs: self.tls_danger_accept_invalid_certs,
+                    #[cfg(feature = "client-cert")]
+                    identity: self.identity,
+                },
                 https_only: self.https_only,
                 redirect_follows,
                 retry_policy: self
@@ -1399,7 +1427,7 @@ mod tests {
             .https_only(true)
             .build()
             .unwrap();
-        assert!(client.inner.accept_invalid_certs);
+        assert!(client.inner.tls.accept_invalid_certs);
         assert!(client.inner.https_only);
 
         // Check the alias too.
@@ -1407,7 +1435,7 @@ mod tests {
             .danger_accept_invalid_certs(true)
             .build()
             .unwrap();
-        assert!(client2.inner.accept_invalid_certs);
+        assert!(client2.inner.tls.accept_invalid_certs);
     }
 
     #[tokio::test]

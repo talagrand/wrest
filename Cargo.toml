@@ -139,6 +139,22 @@ zstd    = ["reqwest?/zstd"]
 ## to `reqwest/stream`.
 stream  = ["reqwest?/stream"]
 
+# -- Native-only extensions (nothing to forward to reqwest) ---------
+
+## Client certificate authentication using the Windows certificate store.
+##
+## Enables [`tls::Identity`], `tls::list_client_certificates()` and
+## `ClientBuilder::identity()`, backed by
+## `WINHTTP_OPTION_CLIENT_CERT_CONTEXT`.  The certificate is referenced in
+## place: no private key material is ever exported, so hardware-backed
+## (smartcard / TPM / PIV) keys work.
+##
+## This is a wrest extension on the native backend.  reqwest's `Identity`
+## constructors take exportable key material and cannot reference a
+## store-resident certificate, so there is nothing to forward to on the
+## reqwest passthrough, where `tls::Identity` remains reqwest's own type.
+client-cert      = ["windows-sys/Win32_Security_Cryptography"]
+
 # -- Diagnostics & compatibility ------------------------------------
 
 ## Enables diagnostic logging via the [`tracing`](https://docs.rs/tracing) crate.
@@ -176,7 +192,7 @@ panicking-compat = []
 ## coverage without accidentally disabling the native WinHTTP backend.
 __all-native-features = [
     "charset", "http2", "default-tls", "native-tls", "system-proxy",
-    "json", "form", "query", "tracing",
+    "json", "form", "query", "tracing", "client-cert",
     "panicking-compat", "noop-compat",
     "gzip", "deflate", "brotli", "zstd",
     "stream",
@@ -218,6 +234,8 @@ scopeguard = { version = "1", default-features = false }
 percent-encoding = "2.3"
 
 [target.'cfg(windows)'.dev-dependencies]
+# SHA-1 for client-certificate thumbprints; already in the graph via rcgen.
+aws-lc-rs = "1.18.1"
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs"] }
 tokio-rustls = "0.26.5"
 

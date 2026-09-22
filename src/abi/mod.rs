@@ -13,12 +13,17 @@
 //! * [`winhttp`] -- WinHTTP session, request, query, and I/O wrappers
 //! * [`encoding`] -- `MultiByteToWideChar` (NLS) and ICU charset decoding
 //! * [`idna`] -- UTS #46 domain processing through Windows system ICU
+//! * [`cert`] -- crypt32 certificate-store access (`client-cert` feature)
 
+#[cfg(feature = "client-cert")]
+mod cert;
 mod encoding;
 mod idna;
 mod winhttp;
 
 // Re-export everything so callers use `crate::abi::winhttp_open_session` etc.
+#[cfg(feature = "client-cert")]
+pub(crate) use cert::*;
 pub(crate) use encoding::*;
 pub(crate) use idna::*;
 pub(crate) use winhttp::*;
