@@ -212,6 +212,7 @@ futures-util = "0.3.31"
 futures-executor = "0.3.31"
 base64 = "0.23"
 mime = "0.3.16"
+scopeguard = { version = "1", default-features = false }
 
 # On non-Windows platforms, reqwest is used as the HTTP passthrough.
 [target.'cfg(not(windows))'.dependencies]

@@ -21,7 +21,11 @@ pub(crate) use encoding::*;
 pub(crate) use winhttp::*;
 
 use crate::Error;
-use windows_sys::Win32::Foundation::GetLastError;
+use std::ffi::CStr;
+use windows_sys::Win32::{
+    Foundation::{FreeLibrary, GetLastError, HMODULE},
+    System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW},
+};
 
 // ---------------------------------------------------------------------------
 // Low-level result helpers
@@ -40,6 +44,54 @@ fn check_win32_bool(result: i32) -> Result<(), Error> {
     } else {
         Err(last_win32_error())
     }
+}
+
+/// Resolve a NUL-terminated export as its exact function-pointer type.
+///
+/// # Safety
+///
+/// `T` must be the ABI-compatible function-pointer type for `name`, and
+/// `module` must remain loaded while the returned pointer can be called.
+unsafe fn get_proc_address<T>(module: HMODULE, name: &CStr) -> Option<T> {
+    let address = unsafe { GetProcAddress(module, name.as_ptr().cast()) }?;
+    assert_eq!(
+        std::mem::size_of::<T>(),
+        std::mem::size_of_val(&address),
+        "function pointers must have the same size"
+    );
+    Some(unsafe { std::mem::transmute_copy(&address) })
+}
+
+/// Load system ICU and resolve a complete export table.
+///
+/// The module remains loaded when `resolve` succeeds so returned function
+/// pointers stay valid. It is released when any required export is absent.
+fn load_icu_exports<T>(resolve: impl FnOnce(HMODULE) -> Option<T>) -> Option<T> {
+    const ICU_DLL: [u16; 8] = [
+        b'i' as u16,
+        b'c' as u16,
+        b'u' as u16,
+        b'.' as u16,
+        b'd' as u16,
+        b'l' as u16,
+        b'l' as u16,
+        0,
+    ];
+
+    let module = unsafe {
+        LoadLibraryExW(ICU_DLL.as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32)
+    };
+    if module.is_null() {
+        return None;
+    }
+
+    let module = scopeguard::guard(module, |module| unsafe {
+        FreeLibrary(module);
+    });
+    let exports = resolve(*module)?;
+    // Keep ICU loaded for the process lifetime so the function table stays valid.
+    let _ = scopeguard::ScopeGuard::into_inner(module);
+    Some(exports)
 }
 
 // ---------------------------------------------------------------------------

@@ -144,65 +144,25 @@ static ICU: OnceLock<Option<IcuFunctions>> = OnceLock::new();
 ///
 /// Called exactly once via [`OnceLock`].  Returns `None` if any step fails.
 fn load_icu() -> Option<IcuFunctions> {
-    use windows_sys::Win32::{
-        Foundation::FreeLibrary,
-        System::LibraryLoader::{LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW},
-    };
+    super::load_icu_exports(|module| {
+        // Microsoft's `icu.dll` exports stable, unversioned ICU names.
+        // SAFETY: Each type alias matches its ICU C declaration.
+        let (Some(ucnv_open), Some(ucnv_to_u_chars), Some(ucnv_close)) = (unsafe {
+            (
+                super::get_proc_address::<UcnvOpenFn>(module, c"ucnv_open"),
+                super::get_proc_address::<UcnvToUCharsFn>(module, c"ucnv_toUChars"),
+                super::get_proc_address::<UcnvCloseFn>(module, c"ucnv_close"),
+            )
+        }) else {
+            return None;
+        };
 
-    // "icu.dll\0" as null-terminated UTF-16.
-    let dll_name: [u16; 8] = [
-        b'i' as u16,
-        b'c' as u16,
-        b'u' as u16,
-        b'.' as u16,
-        b'd' as u16,
-        b'l' as u16,
-        b'l' as u16,
-        0,
-    ];
-    let h = unsafe {
-        LoadLibraryExW(dll_name.as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32)
-    };
-    if h.is_null() {
-        return None;
-    }
-
-    // Resolve each function by name.  Microsoft's `icu.dll` exports
-    // unversioned symbols (e.g. `ucnv_open`, not `ucnv_open_72`),
-    // and appcompat policy guarantees these names are stable.
-    let (Some(open), Some(to_u_chars), Some(close)) = (
-        get_proc(h, b"ucnv_open\0"),
-        get_proc(h, b"ucnv_toUChars\0"),
-        get_proc(h, b"ucnv_close\0"),
-    ) else {
-        unsafe {
-            FreeLibrary(h);
-        }
-        return None;
-    };
-
-    // SAFETY: fn-ptr-to-fn-ptr transmute (always layout-compatible); destination
-    // signatures match ICU's `extern "C"` exports.
-    Some(IcuFunctions {
-        ucnv_open: unsafe {
-            std::mem::transmute::<unsafe extern "system" fn() -> isize, UcnvOpenFn>(open)
-        },
-        ucnv_to_u_chars: unsafe {
-            std::mem::transmute::<unsafe extern "system" fn() -> isize, UcnvToUCharsFn>(to_u_chars)
-        },
-        ucnv_close: unsafe {
-            std::mem::transmute::<unsafe extern "system" fn() -> isize, UcnvCloseFn>(close)
-        },
+        Some(IcuFunctions {
+            ucnv_open,
+            ucnv_to_u_chars,
+            ucnv_close,
+        })
     })
-}
-
-/// Look up a single NUL-terminated export name via `GetProcAddress`.
-fn get_proc(
-    h: *mut core::ffi::c_void,
-    name: &[u8], // e.g. b"ucnv_open\0"
-) -> Option<unsafe extern "system" fn() -> isize> {
-    use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
-    unsafe { GetProcAddress(h, name.as_ptr()) }
 }
 
 // ---------------------------------------------------------------------------
@@ -245,20 +205,9 @@ pub(crate) fn icu_decode(converter_name: &str, data: &[u8]) -> Result<String, Er
         )));
     }
 
-    // RAII guard: ensure `ucnv_close` is called even on early return.
-    struct CnvGuard {
-        cnv: *mut core::ffi::c_void,
-        close: UcnvCloseFn,
-    }
-    impl Drop for CnvGuard {
-        fn drop(&mut self) {
-            unsafe { (self.close)(self.cnv) };
-        }
-    }
-    let _guard = CnvGuard {
-        cnv,
-        close: icu.ucnv_close,
-    };
+    let cnv = scopeguard::guard(cnv, |cnv| unsafe {
+        (icu.ucnv_close)(cnv);
+    });
 
     // Output buffer.  For ISO-8859-* the output is exactly 1 UChar per
     // input byte; for EUC-JP the output is *fewer* UChars than input
@@ -274,7 +223,7 @@ pub(crate) fn icu_decode(converter_name: &str, data: &[u8]) -> Result<String, Er
     let mut conv_err = U_ZERO_ERROR;
     let written = unsafe {
         (icu.ucnv_to_u_chars)(
-            cnv,
+            *cnv,
             buf.as_mut_ptr(),
             capacity_i32,
             data.as_ptr(),
