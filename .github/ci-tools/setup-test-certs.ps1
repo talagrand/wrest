@@ -14,6 +14,7 @@
 .EXAMPLE
     ./.github/ci-tools/setup-test-certs.ps1 -ClientCertificate
     ./.github/ci-tools/setup-test-certs.ps1 -DisposableCertificate
+    ./.github/ci-tools/setup-test-certs.ps1 -UntrustedCertificate
     ./.github/ci-tools/setup-test-certs.ps1 -Cleanup
 #>
 [CmdletBinding()]
@@ -25,6 +26,10 @@ param(
     # under a live Identity.  Separate from the main certificate so that
     # deletion cannot disturb tests running in parallel.
     [switch] $DisposableCertificate,
+
+    # Create a certificate the server is not told to trust, for the test
+    # that a rejected client certificate fails the handshake.
+    [switch] $UntrustedCertificate,
 
     # Remove certificates left by an earlier run, then exit.
     [switch] $Cleanup
@@ -104,4 +109,9 @@ if ($ClientCertificate) {
 if ($DisposableCertificate) {
     $cert = New-TestCertificate -Role 'disposable'
     Publish-Variable -Name 'WREST_MTLS_DISPOSABLE_THUMBPRINT' -Value $cert.Thumbprint
+}
+
+if ($UntrustedCertificate) {
+    $cert = New-TestCertificate -Role 'untrusted'
+    Publish-Variable -Name 'WREST_MTLS_UNTRUSTED_THUMBPRINT' -Value $cert.Thumbprint
 }

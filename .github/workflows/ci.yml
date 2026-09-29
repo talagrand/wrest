@@ -135,6 +135,7 @@ jobs:
       run: |
         ./.github/ci-tools/setup-test-certs.ps1 -ClientCertificate
         ./.github/ci-tools/setup-test-certs.ps1 -DisposableCertificate
+        ./.github/ci-tools/setup-test-certs.ps1 -UntrustedCertificate
 
     - name: Run clippy
       if: steps.resolve.outputs.should-run-full-checks == 'true'
