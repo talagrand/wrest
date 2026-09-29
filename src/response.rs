@@ -240,12 +240,10 @@ impl Response {
 
     /// Read the entire response body as a string.
     ///
-    /// A leading BOM takes priority; otherwise the `Content-Type` header's
-    /// `charset` parameter is used, falling back to UTF-8.
-    ///
-    /// UTF-8 takes a fast pure-Rust path. All other charsets are decoded
-    /// via Win32 `MultiByteToWideChar` following the WHATWG Encoding
-    /// Standard label mapping.
+    /// Per the WHATWG decode algorithm, a leading BOM overrides the
+    /// `Content-Type` charset, and malformed UTF-8 and UTF-16LE/BE input
+    /// yields U+FFFD. Without a BOM or declared charset, UTF-8 is the
+    /// fallback encoding. Other charsets use WHATWG label mappings.
     ///
     /// # Memory
     ///
@@ -254,25 +252,26 @@ impl Response {
     ///
     /// # Deviation from reqwest
     ///
-    /// reqwest uses the `encoding_rs` crate for charset decoding.
-    /// wrest uses Win32 `MultiByteToWideChar` (plus ICU and a lookup
-    /// table for four edge cases) to support all 39 WHATWG encodings.
-    /// Three rare charsets -- ISO-8859-10 (Latin-6 / Nordic),
+    /// reqwest uses `encoding_rs`; wrest uses pure Rust for UTF-8,
+    /// UTF-16LE/BE, `x-user-defined`, and `replacement`, while delegating
+    /// other available code pages to Windows `MultiByteToWideChar`.
+    /// ISO-8859-16 uses a Rust lookup table because neither Win32 nor
+    /// ICU supports it.
+    /// Three rare encodings -- ISO-8859-10 (Latin-6 / Nordic),
     /// ISO-8859-14 (Latin-8 / Celtic), and EUC-JP (Extended Unix Code
-    /// for Japanese) -- require `icu.dll` and are available only on
-    /// Windows 10 1903+; on older builds they will return a decode error.
+    /// for Japanese) -- use ICU via `icu.dll` on Windows 10 1903+;
+    /// older builds return a decode error for them.
     pub async fn text(self) -> Result<String, Error> {
         self.text_with_charset("utf-8").await
     }
 
     /// Read the entire response body, decoding with the given charset.
     ///
-    /// A leading BOM takes priority; the `Content-Type` charset comes next,
-    /// and `default_encoding` is used only when neither applies.
-    ///
-    /// UTF-8 takes a fast pure-Rust path. All other charsets are decoded
-    /// via Win32 `MultiByteToWideChar` following the WHATWG Encoding
-    /// Standard label mapping.
+    /// Per the WHATWG decode algorithm, a leading BOM overrides the
+    /// `Content-Type` charset, and malformed UTF-8 and UTF-16LE/BE input
+    /// yields U+FFFD. `default_encoding` is used only when neither a BOM
+    /// nor a declared charset is present. Other charsets use WHATWG
+    /// label mappings.
     ///
     /// # Memory
     ///
@@ -281,9 +280,9 @@ impl Response {
     ///
     /// # Deviation from reqwest
     ///
-    /// reqwest uses the `encoding_rs` crate for charset decoding.
-    /// wrest uses Win32 `MultiByteToWideChar` instead (see
-    /// [`text()`](Self::text)).
+    /// reqwest uses `encoding_rs`; wrest delegates to Win32 where
+    /// available, with Rust and ICU exceptions described in
+    /// [`text()`](Self::text).
     pub async fn text_with_charset(mut self, default_encoding: &str) -> Result<String, Error> {
         let charset = encoding::extract_charset_from_content_type(&self.headers)
             .unwrap_or_else(|| default_encoding.to_owned());

@@ -11,7 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - HTTP Timeouts: keep explicit zero and positive sub-millisecond phase timeouts finite by clamping/rounding to 1ms.
 - Parsing: replace ad hoc Content-Type parsing with `mime` crate for more precise edge-case handling.
 - Request bodies: retry unwritten bytes after partial `WinHttpWriteData` success.
-- Charset decoding: a BOM now overrides the declared charset, per the WHATWG decode algorithm.
+- Charset decoding: match WHATWG BOM precedence over declared charsets and UTF-16LE/BE replacement behavior for malformed surrogates and odd trailing bytes.
 
 ### Changed
 - CI - Supply chain: SHA-pin all external actions in CI.

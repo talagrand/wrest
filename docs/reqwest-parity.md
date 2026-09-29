@@ -290,8 +290,8 @@ Each row is a single public API item. Status meanings:
 | `extensions()` | ✓ | ✓ | ✅ | |
 | `extensions_mut()` | ✓ | ✓ | ✅ | |
 | `content_length()` | ✓ | ✓ | ✅ | Returns **compressed** (wire) size; reqwest returns **decompressed** size via `hyper::Body::size_hint()`. Identical for uncompressed responses. |
-| `text()` | ✓ | ✓ | ✅ | Decodes using `Content-Type` charset; supports all 39 WHATWG encodings (35 natively via `MultiByteToWideChar`, 3 via ICU, 1 via lookup table). Three rare encodings (ISO-8859-10 (Latin-6 / Nordic), ISO-8859-14 (Latin-8 / Celtic), EUC-JP (Extended Unix Code for Japanese)) fall back to ICU via `icu.dll` and require Windows 10 1903+. |
-| `text_with_charset()` | ✓ | ✓ | ✅ | Caller-specified fallback charset; same 39-encoding support as `text()` |
+| `text()` | ✓ | ✓ | ✅ | Recognizes all 39 WHATWG encodings; ISO-8859-10, ISO-8859-14, and EUC-JP require Windows 10 1903+. Follows WHATWG BOM precedence over `Content-Type` and replacement rules for malformed UTF-8/UTF-16LE/BE, with UTF-8 as the fallback encoding. |
+| `text_with_charset()` | ✓ | ✓ | ✅ | Same BOM and `Content-Type` precedence as `text()`; uses the caller's charset when neither is present. |
 | `json()` | ✓ | ✓ | ✅ | behind `json` feature |
 | `bytes()` | ✓ | ✓ | ✅ | |
 | `chunk()` | ✓ | ✓ | ✅ | |

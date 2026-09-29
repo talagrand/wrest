@@ -58,7 +58,7 @@
 //! Reference: <https://encoding.spec.whatwg.org/>
 //! Canonical label list: <https://encoding.spec.whatwg.org/encodings.json>
 
-use crate::{Error, abi, util::string_from_utf16};
+use crate::{Error, abi};
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -66,8 +66,11 @@ use crate::{Error, abi, util::string_from_utf16};
 
 /// Decode `data` according to the WHATWG charset `label`.
 ///
-/// * **UTF-8** labels take a fast, pure-Rust path (`String::from_utf8` /
-///   `from_utf8_lossy`), never calling into Win32.
+/// * **UTF-8** labels use `String::from_utf8` for valid input and
+///   `String::from_utf8_lossy` for WHATWG-compatible U+FFFD replacement
+///   of malformed bytes, without calling Win32.
+/// * **UTF-16LE/BE** follow WHATWG replacement behavior for malformed
+///   surrogates and incomplete bytes.
 /// * Unknown labels silently fall back to UTF-8.
 /// * The `replacement` encoding (used by the spec to error-out certain
 ///   legacy labels) returns `U+FFFD` for any input.
@@ -108,8 +111,8 @@ pub(crate) fn decode_body(data: &[u8], charset: &str) -> Result<String, Error> {
     match codepage {
         CP_X_USER_DEFINED => return Ok(decode_x_user_defined(data)),
         CP_REPLACEMENT => return Ok(String::from('\u{FFFD}')),
-        CP_UTF16_LE => return decode_utf16le(data),
-        CP_UTF16_BE => return decode_utf16be(data),
+        CP_UTF16_LE => return Ok(decode_utf16(data, u16::from_le_bytes)),
+        CP_UTF16_BE => return Ok(decode_utf16(data, u16::from_be_bytes)),
         CP_ISO_8859_16 => return Ok(decode_iso_8859_16(data)),
         _ => {}
     }
@@ -411,24 +414,23 @@ fn decode_iso_8859_16(data: &[u8]) -> String {
         .collect()
 }
 
-/// Decode a UTF-16LE byte stream.
-fn decode_utf16le(data: &[u8]) -> Result<String, Error> {
+/// Decode a UTF-16 byte stream with WHATWG-conformant replacement semantics for malformed input.
+fn decode_utf16(data: &[u8], from_bytes: fn([u8; 2]) -> u16) -> String {
     let (pairs, rest) = data.as_chunks::<2>();
-    if !rest.is_empty() {
-        return Err(Error::decode("invalid UTF-16LE: odd byte count"));
-    }
-    let words: Vec<u16> = pairs.iter().map(|c| u16::from_le_bytes(*c)).collect();
-    string_from_utf16(&words, "invalid UTF-16LE")
-}
+    let words: Vec<u16> = pairs.iter().map(|c| from_bytes(*c)).collect();
+    let mut result = String::from_utf16_lossy(&words);
 
-/// Decode a UTF-16BE byte stream.
-fn decode_utf16be(data: &[u8]) -> Result<String, Error> {
-    let (pairs, rest) = data.as_chunks::<2>();
-    if !rest.is_empty() {
-        return Err(Error::decode("invalid UTF-16BE: odd byte count"));
+    // `from_utf16_lossy` handles complete code units but cannot see the odd
+    // trailing byte. WHATWG counts that byte and a pending high surrogate as
+    // one error, already replaced by `from_utf16_lossy`.
+    if !rest.is_empty()
+        && !words
+            .last()
+            .is_some_and(|word| (0xD800..=0xDBFF).contains(word))
+    {
+        result.push('\u{FFFD}');
     }
-    let words: Vec<u16> = pairs.iter().map(|c| u16::from_be_bytes(*c)).collect();
-    string_from_utf16(&words, "invalid UTF-16BE")
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -562,6 +564,12 @@ mod tests {
             (&[0xFF, 0xFE, 0x41, 0x00], "utf-8", "A", "UTF-16LE BOM beats utf-8 label"),
             (&[0xFE, 0xFF, 0x00, 0x41], "utf-8", "A", "UTF-16BE BOM beats utf-8 label"),
             (&[0xEF, 0xBB, 0xBF, b'h', b'i'], "windows-1252", "hi", "UTF-8 BOM beats 1252 label"),
+            (
+                &[0xEF, 0xBB, 0xBF, b'A', 0xFF, b'B'],
+                "utf-16be",
+                "A\u{FFFD}B",
+                "UTF-8 BOM beats UTF-16BE label for malformed UTF-8",
+            ),
             (&[0xFE, 0xFF, 0x00, 0x41], "utf-16le", "A", "BE BOM beats utf-16le label"),
             (&[0xFF, 0xFE, 0x41, 0x00], "totally-bogus", "A", "BOM beats unknown label"),
             // The sniffed BOM is consumed once; a literal U+FEFF after it survives.
@@ -620,6 +628,18 @@ mod tests {
             // Basic
             ("utf-16le", &[0x41, 0x00, 0x42, 0x00], "AB", "LE basic"),
             ("utf-16be", &[0x00, 0x41, 0x00, 0x42], "AB", "BE basic"),
+            (
+                "utf-16le",
+                &[0x41, 0x00, 0x34, 0xD8, 0x1E, 0xDD, 0x42, 0x00],
+                "A\u{1D11E}B",
+                "LE surrogate pair",
+            ),
+            (
+                "utf-16be",
+                &[0x00, 0x41, 0xD8, 0x34, 0xDD, 0x1E, 0x00, 0x42],
+                "A\u{1D11E}B",
+                "BE surrogate pair",
+            ),
             // BOM stripping
             ("utf-16le", &[0xFF, 0xFE, 0x41, 0x00], "A", "LE BOM stripped"),
             ("utf-16be", &[0xFE, 0xFF, 0x00, 0x41], "A", "BE BOM stripped"),
@@ -632,24 +652,106 @@ mod tests {
     }
 
     #[test]
-    fn utf16_errors_table() {
-        // Lone surrogates → error (from_utf16 rejects them).
-        // Odd byte count → error (structurally invalid UTF-16).
-        let cases: &[(&str, &[u8], &str)] = &[
-            ("utf-16le", &[0x00, 0xD8], "LE lone high surrogate"),
-            ("utf-16be", &[0xD8, 0x00], "BE lone high surrogate"),
-            ("utf-16le", &[0x41, 0x00, 0x42], "LE odd byte count"),
-            ("utf-16be", &[0x00, 0x41, 0x42], "BE odd byte count"),
-            // BOM stripping leaves odd remainder → still invalid.
-            ("utf-16le", &[0xFF, 0xFE, 0x42], "LE BOM + odd remainder"),
-            ("utf-16be", &[0xFE, 0xFF, 0x00], "BE BOM + odd remainder"),
-            // A sniffed BOM routes any label to the UTF-16 decoder, fatal path included.
-            ("utf-8", &[0xFF, 0xFE, 0x41], "sniffed LE + odd remainder"),
-            ("utf-8", &[0xFE, 0xFF, 0x41], "sniffed BE + odd remainder"),
+    fn utf16_replacement_table() {
+        let cases: &[(&str, &[u8], &str, &str)] = &[
+            // (charset, data, expected, description)
+            ("utf-16le", &[0x00, 0xD8], "\u{FFFD}", "LE lone high surrogate"),
+            ("utf-16be", &[0xD8, 0x00], "\u{FFFD}", "BE lone high surrogate"),
+            (
+                "utf-16le",
+                &[0x41, 0x00, 0x00, 0xDC, 0x42, 0x00],
+                "A\u{FFFD}B",
+                "LE lone low surrogate",
+            ),
+            (
+                "utf-16be",
+                &[0x00, 0x41, 0xDC, 0x00, 0x00, 0x42],
+                "A\u{FFFD}B",
+                "BE lone low surrogate",
+            ),
+            (
+                "utf-16le",
+                &[0x00, 0xD8, 0x41, 0x00],
+                "\u{FFFD}A",
+                "LE high surrogate followed by BMP",
+            ),
+            (
+                "utf-16be",
+                &[0xD8, 0x00, 0x00, 0x41],
+                "\u{FFFD}A",
+                "BE high surrogate followed by BMP",
+            ),
+            (
+                "utf-16le",
+                &[0x00, 0xD8, 0x00, 0xD8, 0x41, 0x00],
+                "\u{FFFD}\u{FFFD}A",
+                "LE consecutive high surrogates",
+            ),
+            (
+                "utf-16be",
+                &[0xD8, 0x00, 0xD8, 0x00, 0x00, 0x41],
+                "\u{FFFD}\u{FFFD}A",
+                "BE consecutive high surrogates",
+            ),
+            ("utf-16le", &[0x41], "\u{FFFD}", "LE single byte"),
+            ("utf-16be", &[0x41], "\u{FFFD}", "BE single byte"),
+            ("utf-16le", &[0x41, 0x00, 0x42], "A\u{FFFD}", "LE odd trailing byte"),
+            ("utf-16be", &[0x00, 0x41, 0x42], "A\u{FFFD}", "BE odd trailing byte"),
+            ("utf-16le", &[0xFF, 0xFE, 0x41, 0x00, 0x42], "A\u{FFFD}", "LE BOM + odd remainder"),
+            ("utf-16be", &[0xFE, 0xFF, 0x00, 0x41, 0x42], "A\u{FFFD}", "BE BOM + odd remainder"),
+            (
+                "utf-8",
+                &[0xFF, 0xFE, 0x41, 0x00, 0x42],
+                "A\u{FFFD}",
+                "LE BOM beats UTF-8 with odd remainder",
+            ),
+            (
+                "utf-16le",
+                &[0xFE, 0xFF, 0x00, 0x41, 0x42],
+                "A\u{FFFD}",
+                "BE BOM beats LE with odd remainder",
+            ),
+            (
+                "utf-16le",
+                &[0x41, 0x00, 0x00, 0xD8, 0x42],
+                "A\u{FFFD}",
+                "LE high surrogate + odd byte is one error",
+            ),
+            (
+                "utf-16be",
+                &[0x00, 0x41, 0xD8, 0x00, 0x42],
+                "A\u{FFFD}",
+                "BE high surrogate + odd byte is one error",
+            ),
+            (
+                "utf-8",
+                &[0xFF, 0xFE, 0x41, 0x00, 0x00, 0xD8, 0x42],
+                "A\u{FFFD}",
+                "LE BOM + high surrogate + odd byte",
+            ),
+            (
+                "utf-16le",
+                &[0xFE, 0xFF, 0x00, 0x41, 0xD8, 0x00, 0x42],
+                "A\u{FFFD}",
+                "BE BOM + high surrogate + odd byte",
+            ),
+            (
+                "utf-8",
+                &[0xFF, 0xFE, 0xFF, 0xFE, 0x00, 0xD8, 0x41],
+                "\u{FEFF}\u{FFFD}",
+                "LE double BOM + high surrogate + odd byte",
+            ),
+            (
+                "utf-8",
+                &[0xFE, 0xFF, 0xFE, 0xFF, 0xD8, 0x00, 0x41],
+                "\u{FEFF}\u{FFFD}",
+                "BE double BOM + high surrogate + odd byte",
+            ),
         ];
 
-        for &(charset, data, desc) in cases {
-            assert!(decode_body(data, charset).is_err(), "{desc}: should fail");
+        for &(charset, data, expected, desc) in cases {
+            let result = decode_body(data, charset).unwrap_or_else(|e| panic!("{desc}: {e}"));
+            assert_eq!(result, expected, "{desc}");
         }
     }
 

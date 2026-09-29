@@ -1067,24 +1067,6 @@ async fn headers_mut_modify() {
     assert_eq!(resp.headers().get("x-added").unwrap().to_str().unwrap(), "injected");
 }
 
-/// `text_with_charset_utf8`: UTF-8 body passes through text_with_charset.
-#[cfg(any(native_winhttp, feature = "charset"))]
-#[tokio::test]
-async fn text_with_charset_utf8() {
-    let server = mock_get("/charset", 200, "hello UTF-8").await;
-
-    let text = test_client()
-        .get(format!("{}/charset", server.uri()))
-        .send()
-        .await
-        .expect("request should succeed")
-        .text_with_charset("windows-1252")
-        .await
-        .expect("text_with_charset should succeed");
-
-    assert_eq!(text, "hello UTF-8");
-}
-
 /// `try_clone_send_both`: clone a request builder, send both copies.
 #[tokio::test]
 async fn try_clone_send_both() {
@@ -1456,39 +1438,82 @@ async fn content_length_absent() {
 }
 
 // -----------------------------------------------------------------------
-// text() with charset
+// Text decoding with charset and BOM
 // -----------------------------------------------------------------------
 
-/// `text_with_latin1_charset`: mock server sends Latin-1 encoded bytes with
-/// `Content-Type: text/html; charset=iso-8859-1`. Verify `text()` decodes
-/// the non-ASCII bytes correctly.
+/// Exercise charset selection and replacement through both text APIs.
 #[cfg(any(native_winhttp, feature = "charset"))]
 #[tokio::test]
-async fn text_with_latin1_charset() {
+async fn text_decoding_charset_and_bom() {
+    struct Case {
+        name: &'static str,
+        body: &'static [u8],
+        content_type: &'static str,
+        fallback: Option<&'static str>,
+        expected: &'static str,
+    }
+
+    let cases = [
+        // UTF-8 body passes through text_with_charset with a different fallback.
+        Case {
+            name: "utf8",
+            body: b"hello UTF-8",
+            content_type: "text/plain; charset=utf-8",
+            fallback: Some("windows-1252"),
+            expected: "hello UTF-8",
+        },
+        // Latin-1 bytes for "cafe": 0xE9 decodes to U+00E9.
+        Case {
+            name: "latin1",
+            body: b"caf\xE9", // spellchecker:disable-line
+            content_type: "text/html; charset=iso-8859-1",
+            fallback: None,
+            expected: "caf\u{e9}", // spellchecker:disable-line
+        },
+        // The BOM overrides a conflicting declared charset; the trailing
+        // high surrogate and odd byte produce one replacement.
+        Case {
+            name: "bom-declared",
+            body: &[0xFF, 0xFE, 0x41, 0x00, 0x00, 0xD8, 0x42],
+            content_type: "text/plain; charset=utf-8",
+            fallback: None,
+            expected: "A\u{FFFD}",
+        },
+        // Without a declared charset, the BOM also beats the caller's fallback.
+        Case {
+            name: "bom-default",
+            body: &[0xFE, 0xFF, 0x00, 0x41, 0xD8, 0x00, 0x42],
+            content_type: "text/plain",
+            fallback: Some("windows-1252"),
+            expected: "A\u{FFFD}",
+        },
+    ];
+
     let server = MockServer::start().await;
 
-    // Latin-1 bytes for "cafe" (e with acute = 0xE9 in ISO-8859-1).
-    let latin1_body: Vec<u8> = vec![0x63, 0x61, 0x66, 0xE9];
+    for case in cases {
+        let route = format!("/encoding/{}", case.name);
+        Mock::given(method("GET"))
+            .and(path(route.as_str()))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(case.body.to_vec(), case.content_type),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
 
-    Mock::given(method("GET"))
-        .and(path("/latin"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/html; charset=iso-8859-1")
-                .set_body_raw(latin1_body, "text/html; charset=iso-8859-1"),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let resp = test_client()
-        .get(format!("{}/latin", server.uri()))
-        .send()
-        .await
-        .expect("request should succeed");
-
-    let text = resp.text().await.expect("text() should succeed");
-    assert_eq!(text, "caf\u{e9}", "Latin-1 0xE9 should decode to U+00E9"); // spellchecker:disable-line
+        let response = test_client()
+            .get(format!("{}{route}", server.uri()))
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("{}: request failed: {e}", case.name));
+        let text = match case.fallback {
+            Some(charset) => response.text_with_charset(charset).await,
+            None => response.text().await,
+        }
+        .unwrap_or_else(|e| panic!("{}: text decoding failed: {e}", case.name));
+        assert_eq!(text, case.expected, "{}", case.name);
+    }
 }
 
 // -----------------------------------------------------------------------
