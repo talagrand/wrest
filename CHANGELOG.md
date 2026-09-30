@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Changed
 - CI - Supply chain: SHA-pin all external actions in CI.
+- CI - Reliability: swap HTTPS httpbin.org for local go-httpbin for reliability (doesn't affect local testing)
 
 ## 0.5.7
 

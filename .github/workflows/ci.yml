@@ -96,8 +96,11 @@ jobs:
       if: failure() && steps.resolve.outputs.should-run-full-checks == 'true'
       shell: bash
       run: |
-        echo "::group::go-httpbin log"
-        cat httpbin.log || echo "(no httpbin.log found)"
+        echo "::group::go-httpbin (http) log"
+        cat httpbin-http.log || echo "(no httpbin-http.log found)"
+        echo "::endgroup::"
+        echo "::group::go-httpbin (https) log"
+        cat httpbin-https.log || echo "(no httpbin-https.log found)"
         echo "::endgroup::"
 
     - name: Check library (MSRV)
@@ -177,8 +180,11 @@ jobs:
       if: failure()
       shell: bash
       run: |
-        echo "::group::go-httpbin log"
-        cat httpbin.log || echo "(no httpbin.log found)"
+        echo "::group::go-httpbin (http) log"
+        cat httpbin-http.log || echo "(no httpbin-http.log found)"
+        echo "::endgroup::"
+        echo "::group::go-httpbin (https) log"
+        cat httpbin-https.log || echo "(no httpbin-https.log found)"
         echo "::endgroup::"
 
     - name: Upload to Codecov

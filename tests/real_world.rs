@@ -45,7 +45,7 @@ fn test_client() -> Client {
         .expect("client build should succeed")
 }
 
-/// CI sets `HTTPBIN_URL` to a local go-httpbin instance to insulate against flakiness from
+/// CI sets `HTTPBIN_HTTP_URL` to a local go-httpbin instance to insulate against flakiness from
 /// a public site (though some tests still hit live endpoints that can't be covered by httpbin,
 /// like SSL and proxy tests, though experience shows they're far more reliable).
 /// Local testing is free to do the same of course, but normally hits httpbin.org proper -
@@ -58,7 +58,20 @@ fn test_client() -> Client {
     feature = "deflate"
 ))]
 fn httpbin(path: &str) -> String {
-    let base = std::env::var("HTTPBIN_URL").unwrap_or_else(|_| "https://httpbin.org".to_string());
+    let base =
+        std::env::var("HTTPBIN_HTTP_URL").unwrap_or_else(|_| "https://httpbin.org".to_string());
+    format!("{base}{path}")
+}
+
+/// Base for the *HTTPS* go-httpbin instance, used by the redirect-downgrade
+/// tests that need a real https initial leg. CI serves this from a local
+/// self-signed instance (`HTTPBIN_HTTPS_URL`); those tests pair it with
+/// `tls_danger_accept_invalid_certs(true)` so the throwaway cert needs no
+/// trust chain or hostname match. Falls back to live httpbin.org for local runs.
+#[cfg(any(native_winhttp, feature = "default-tls", feature = "native-tls"))]
+fn httpbin_https(path: &str) -> String {
+    let base =
+        std::env::var("HTTPBIN_HTTPS_URL").unwrap_or_else(|_| "https://httpbin.org".to_string());
     format!("{base}{path}")
 }
 
@@ -152,12 +165,15 @@ async fn httpbin_redirect_chain() {
 #[tokio::test]
 #[cfg(any(native_winhttp, feature = "default-tls", feature = "native-tls"))]
 async fn https_only_blocks_https_to_http_redirect() {
-    // Always hits live https httpbin: CI's local override is http-only, which would trip https_only on the initial leg before any redirect.
-    let target = "https://httpbin.org/redirect-to?url=http%3A%2F%2Fexample.com%2F&status_code=302";
+    // Local HTTPS go-httpbin in CI (HTTPBIN_HTTPS_URL), else live httpbin.org. The
+    // initial leg must be https so https_only doesn't trip before the redirect.
+    let target = httpbin_https("/redirect-to?url=http%3A%2F%2Fexample.com%2F&status_code=302");
 
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
         .https_only(true)
+        // Only the local test server uses a self-signed certificate.
+        .tls_danger_accept_invalid_certs(std::env::var_os("HTTPBIN_HTTPS_URL").is_some())
         .build()
         .expect("client build should succeed");
 
@@ -190,10 +206,17 @@ async fn https_only_blocks_https_to_http_redirect() {
 #[tokio::test]
 #[cfg(native_winhttp)]
 async fn winhttp_default_blocks_https_to_http_redirect() {
-    // Always hits live https httpbin: the policy only fires on an https->http downgrade, which CI's http-only local override can't produce.
-    let target = "https://httpbin.org/redirect-to?url=http%3A%2F%2Fexample.com%2F&status_code=302";
+    // Local HTTPS go-httpbin in CI (HTTPBIN_HTTPS_URL), else live httpbin.org. The
+    // downgrade block only fires on https->http, so the initial leg must be https.
+    let target = httpbin_https("/redirect-to?url=http%3A%2F%2Fexample.com%2F&status_code=302");
 
-    let client = test_client();
+    // "Default" = no https_only (the property under test); the local server's
+    // self-signed certificate is orthogonal to redirects.
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .tls_danger_accept_invalid_certs(std::env::var_os("HTTPBIN_HTTPS_URL").is_some())
+        .build()
+        .expect("client build should succeed");
 
     let err = client
         .get(target)
