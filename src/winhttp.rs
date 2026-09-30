@@ -1004,8 +1004,8 @@ pub(crate) async fn execute_request(
         }
     }
 
-    // Disable certificate validation if requested
-    if accept_invalid_certs && url.is_https {
+    // Set this on HTTP handles too: WinHTTP reuses it for HTTPS redirects.
+    if accept_invalid_certs {
         let security_flags: u32 = SECURITY_FLAG_IGNORE_UNKNOWN_CA
             | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
             | SECURITY_FLAG_IGNORE_CERT_CN_INVALID

@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Parsing: replace ad hoc Content-Type parsing with `mime` crate for more precise edge-case handling.
 - Request bodies: retry unwritten bytes after partial `WinHttpWriteData` success.
 - Charset decoding: match WHATWG BOM precedence over declared charsets and UTF-16LE/BE replacement behavior for malformed surrogates and odd trailing bytes.
+- TLS: When configured, honor dangerous-invalid-certs setting for HTTPS destinations reached through HTTP-to-HTTPS redirects.
 
 ### Changed
 - CI - Supply chain: SHA-pin all external actions in CI.

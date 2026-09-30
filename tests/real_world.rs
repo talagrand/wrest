@@ -27,6 +27,11 @@
 #![expect(clippy::tests_outside_test_module)]
 
 use std::time::Duration;
+#[cfg(any(native_winhttp, feature = "default-tls", feature = "native-tls"))]
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, path},
+};
 use wrest::Client;
 #[cfg(any(
     native_winhttp,
@@ -307,20 +312,42 @@ async fn badssl_invalid_certs_rejected() {
     }
 }
 
-/// Test tls_danger_accept_invalid_certs allows self-signed certificates
+/// The explicit TLS bypass covers direct HTTPS and HTTP-to-HTTPS redirects.
 #[cfg(any(native_winhttp, feature = "default-tls", feature = "native-tls"))]
 #[tokio::test]
 async fn badssl_with_accept_invalid_certs() {
-    // With tls_danger_accept_invalid_certs, we should succeed
+    let target = "https://self-signed.badssl.com/";
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/redirect"))
+        .respond_with(ResponseTemplate::new(302).insert_header("Location", target))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let redirected = format!("{}/redirect", server.uri());
+
+    let err = test_client()
+        .get(&redirected)
+        .send()
+        .await
+        .expect_err("the redirected self-signed certificate must be rejected by default");
+    assert!(err.is_connect(), "expected a TLS connection error, got: {err:?}");
+
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
         .tls_danger_accept_invalid_certs(true)
         .build()
         .expect("client should build");
 
-    let result = client.get("https://self-signed.badssl.com/").send().await;
-
-    assert!(result.is_ok(), "with tls_danger_accept_invalid_certs should succeed");
+    for url in [target, redirected.as_str()] {
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .expect("the explicit TLS bypass must succeed");
+        assert!(response.status().is_success(), "{url} returned {}", response.status());
+        assert_eq!(response.url().as_str(), target, "{url}");
+    }
 }
 
 // -----------------------------------------------------------------------
