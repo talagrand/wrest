@@ -19,6 +19,48 @@ env:
   MSRV: '1.90'
 
 jobs:
+  discover-tools:
+    name: Discover standalone Rust workspaces
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      workspaces: ${{ steps.find.outputs.workspaces }}
+      has_workspaces: ${{ steps.find.outputs.has_workspaces }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Discover workspaces
+      id: find
+      shell: bash
+      run: |
+        set -euo pipefail
+        workspaces_raw=$(
+          find tools -type d -name target -prune -o -type f -name Cargo.toml -print |
+            while IFS= read -r manifest; do
+              if grep -qE '^\[workspace\][[:space:]]*$' "$manifest"; then
+                dirname "$manifest"
+              fi
+            done | sort -u
+        )
+        if [ -z "$workspaces_raw" ]; then
+          echo "No standalone Cargo workspaces discovered."
+          {
+            echo "workspaces=[]"
+            echo "has_workspaces=false"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        mapfile -t workspaces <<< "$workspaces_raw"
+        printf 'Discovered: %s\n' "${workspaces[@]}"
+        json=$(printf '%s\n' "${workspaces[@]}" |
+          jq -Rsc 'split("\n") | map(sub("\r$"; "") | select(length > 0) | {path: .})')
+        {
+          echo "workspaces=$json"
+          echo "has_workspaces=true"
+        } >> "$GITHUB_OUTPUT"
+
   test:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -130,6 +172,39 @@ jobs:
 
     - name: Check formatting
       run: cargo fmt --all -- --check
+
+  standalone-tools:
+    name: Standalone Rust / ${{ matrix.path }}
+    needs: discover-tools
+    if: needs.discover-tools.outputs.has_workspaces == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.discover-tools.outputs.workspaces) }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Install Rust
+      uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      with:
+        toolchain: stable
+        components: clippy,rustfmt
+
+    - name: Check formatting
+      working-directory: ${{ matrix.path }}
+      run: cargo fmt --all -- --check
+
+    - name: Run clippy
+      working-directory: ${{ matrix.path }}
+      run: cargo clippy --locked --all-targets -- -D warnings
+
+    - name: Run tests
+      working-directory: ${{ matrix.path }}
+      run: cargo test --locked --all-targets
 
   docs:
     name: Documentation
@@ -276,11 +351,10 @@ jobs:
     name: CI Success
     if: always()
     runs-on: ubuntu-latest
-    needs: [test, fmt, typos, workflow-lint, docs, coverage, security, minimal-versions]
+    needs: [discover-tools, test, fmt, standalone-tools, typos, workflow-lint, docs, coverage, security, minimal-versions]
     steps:
       - name: Verify all required jobs succeeded
         if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: |
           echo "One or more required jobs failed or were cancelled."
           exit 1
-

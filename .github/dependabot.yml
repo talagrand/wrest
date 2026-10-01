@@ -1,8 +1,10 @@
 version: 2
 updates:
-  # Enable version updates for Cargo
+  # Enable version updates for Cargo manifests in the root and subdirectories
   - package-ecosystem: "cargo"
-    directory: "/"
+    directories:
+      - "/"
+      - "**/*"
     schedule:
       interval: "monthly"
     open-pull-requests-limit: 10
