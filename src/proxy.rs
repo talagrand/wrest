@@ -1,7 +1,7 @@
 //! Proxy configuration from environment variables.
 //!
 //! Reads `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` env vars once at
-//! [`Client`](crate::Client) build time and caches the result. Per-request
+//! [`Client`] build time and caches the result. Per-request
 //! proxy resolution checks the cached `NO_PROXY` list against each request's
 //! target host.
 //!
