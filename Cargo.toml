@@ -50,9 +50,9 @@ default = ["default-tls", "charset", "http2", "system-proxy"]
 
 ## Improved support for decoding text.
 ##
-## wrest natively supports all 39 WHATWG encodings via Win32
-## `MultiByteToWideChar` (plus ICU and a lookup table for edge cases),
-## so this feature is a no-op on the native backend.  On the reqwest
+## wrest recognizes all 39 WHATWG encodings via Rust, ICU, and NLS.
+## Some mappings and invalid-input recovery can differ from
+## WHATWG; this feature is a no-op on the native backend. On the reqwest
 ## passthrough it forwards to `reqwest/charset`.
 charset     = ["reqwest?/charset"]
 

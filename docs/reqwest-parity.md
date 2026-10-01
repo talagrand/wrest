@@ -290,7 +290,7 @@ Each row is a single public API item. Status meanings:
 | `extensions()` | ✓ | ✓ | ✅ | |
 | `extensions_mut()` | ✓ | ✓ | ✅ | |
 | `content_length()` | ✓ | ✓ | ✅ | Returns **compressed** (wire) size; reqwest returns **decompressed** size via `hyper::Body::size_hint()`. Identical for uncompressed responses. |
-| `text()` | ✓ | ✓ | ✅ | Recognizes all 39 WHATWG encodings; ISO-8859-10, ISO-8859-14, and EUC-JP require Windows 10 1903+. Follows WHATWG BOM precedence over `Content-Type` and replacement rules for malformed UTF-8/UTF-16LE/BE, with UTF-8 as the fallback encoding. |
+| `text()` | ✓ | ✓ | ✅ | Recognizes all 39 WHATWG encodings: three rare encodings require system ICU (Windows 10 1903+), fifteen prefer ICU with NLS fallback. Native converter mappings and invalid-input recovery can differ from WHATWG in some spots; see `src/encoding.rs` and `tools/encoding-parity/`. |
 | `text_with_charset()` | ✓ | ✓ | ✅ | Same BOM and `Content-Type` precedence as `text()`; uses the caller's charset when neither is present. |
 | `json()` | ✓ | ✓ | ✅ | behind `json` feature |
 | `bytes()` | ✓ | ✓ | ✅ | |

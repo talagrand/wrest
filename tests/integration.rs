@@ -1470,6 +1470,20 @@ async fn text_decoding_charset_and_bom() {
             fallback: None,
             expected: "caf\u{e9}", // spellchecker:disable-line
         },
+        Case {
+            name: "thai",
+            body: &[0x80, 0xA1, 0xDB],
+            content_type: "text/plain; charset=windows-874",
+            fallback: None,
+            expected: "\u{20AC}\u{0E01}\u{FFFD}",
+        },
+        Case {
+            name: "japanese",
+            body: b"\x1B$B!A\x1B(B",
+            content_type: "text/plain; charset=iso-2022-jp",
+            fallback: None,
+            expected: "\u{FF5E}",
+        },
         // The BOM overrides a conflicting declared charset; the trailing
         // high surrogate and odd byte produce one replacement.
         Case {

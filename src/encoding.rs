@@ -3,12 +3,11 @@
 //! All 39 encodings mandated by the [WHATWG Encoding Standard][spec] are
 //! supported:
 //!
-//! * **35 natively** -- UTF-8 takes a fast pure-Rust path; UTF-16LE/BE,
-//!   x-user-defined, and the `replacement` pseudo-encoding are decoded in
-//!   pure Rust as well; the remaining 30 single-byte and CJK encodings go
-//!   through [`MultiByteToWideChar`].
+//! * **5 in Rust** -- UTF-8, UTF-16LE/BE, x-user-defined, and ISO-8859-16.
+//!   The `replacement` pseudo-encoding is also handled in Rust, but is not
+//!   counted among the 39.
 //!
-//! * **3 via ICU** -- ISO-8859-10 (Latin-6 / Nordic), ISO-8859-14
+//! * **3 requiring ICU** -- ISO-8859-10 (Latin-6 / Nordic), ISO-8859-14
 //!   (Latin-8 / Celtic), and EUC-JP (Extended Unix Code for Japanese)
 //!   are absent from the Win32 NLS subsystem (see
 //!   [below](#why-three-encodings-need-icu)).  On Windows 10 1903+ they
@@ -16,10 +15,16 @@
 //!   older builds, content labelled with these charsets will produce a
 //!   decode error from [`Response::text()`](crate::Response::text).
 //!
-//! * **1 via lookup table** -- ISO-8859-16 (Latin-10 / South-Eastern
-//!   European) is absent from both NLS *and* ICU, so it is decoded via a
-//!   compile-time 128-entry Rust table (e.g. byte `0xAA` → `U+0218 Ș`).
-//!   No runtime dependency required.
+//! * **15 preferring ICU, with NLS fallback** -- system ICU more closely
+//!   follows WHATWG for selected single-byte and CJK encodings. A missing
+//!   ICU library falls back to [`MultiByteToWideChar`]; a conversion error
+//!   does not.
+//!
+//! * **16 via NLS** -- NLS is at least as close as the available ICU
+//!   converter on the measured inputs.
+//!
+//! ISO-8859-16 (Latin-10) is absent from both NLS and system ICU; its Rust
+//! path uses a compile-time 128-entry WHATWG table.
 //!
 //! # Why three encodings need ICU
 //!
@@ -68,7 +73,7 @@ use crate::{Error, abi};
 ///
 /// * **UTF-8** labels use `String::from_utf8` for valid input and
 ///   `String::from_utf8_lossy` for WHATWG-compatible U+FFFD replacement
-///   of malformed bytes, without calling Win32.
+///   of malformed bytes, without calling NLS.
 /// * **UTF-16LE/BE** follow WHATWG replacement behavior for malformed
 ///   surrogates and incomplete bytes.
 /// * Unknown labels silently fall back to UTF-8.
@@ -117,15 +122,27 @@ pub(crate) fn decode_body(data: &[u8], charset: &str) -> Result<String, Error> {
         _ => {}
     }
 
-    // -- ICU fallback for NLS-unsupported code pages -------------------
-    if let Some(icu_name) = codepage_to_icu_name(codepage) {
-        trace!(label = charset, codepage, icu = icu_name, "charset: ICU fallback decode");
-        return abi::icu_decode(icu_name, data);
+    match codepage_backend(codepage) {
+        Some(CodepageBackend::IcuRequired(icu_name)) => {
+            trace!(label = charset, codepage, icu = icu_name, "charset: required ICU decode");
+            abi::icu_decode(icu_name, data)
+        }
+        Some(CodepageBackend::IcuPreferred(icu_name)) => {
+            trace!(label = charset, codepage, icu = icu_name, "charset: preferred ICU decode");
+            decode_icu_preferred(
+                codepage,
+                icu_name,
+                data,
+                abi::icu_decode_if_available,
+                abi::multi_byte_to_string,
+            )
+        }
+        Some(CodepageBackend::Nls) => {
+            trace!(label = charset, codepage, "charset: NLS codepage decode");
+            abi::multi_byte_to_string(codepage, data)
+        }
+        None => Err(Error::decode(format!("no charset decoder for code page {codepage}"))),
     }
-
-    // -- Win32 MultiByteToWideChar ------------------------------------
-    trace!(label = charset, codepage, "charset: Win32 codepage decode");
-    abi::multi_byte_to_string(codepage, data)
 }
 
 // ---------------------------------------------------------------------------
@@ -143,14 +160,151 @@ const CP_UTF16_BE: u32 = 1201;
 /// ISO-8859-16: absent from both NLS and ICU; decoded via pure-Rust table.
 const CP_ISO_8859_16: u32 = 28606;
 
-/// Returns the ICU converter name for code pages not supported by Win32
-/// `MultiByteToWideChar` but available in the system-bundled `icu.dll`.
-fn codepage_to_icu_name(codepage: u32) -> Option<&'static str> {
-    match codepage {
-        28600 => Some("ISO-8859-10"),
-        28604 => Some("ISO-8859-14"),
-        51932 => Some("EUC-JP"),
-        _ => None,
+#[derive(Debug, PartialEq, Eq)]
+enum CodepageBackend {
+    IcuRequired(&'static str),
+    IcuPreferred(&'static str),
+    Nls,
+}
+
+// The checked-in tools/encoding-parity/ probe compares complete decoded
+// strings from NLS (MultiByteToWideChar with flags 0) and system ICU against
+// the WHATWG decoder (https://encoding.spec.whatwg.org/) via encoding_rs.
+// It covers single bytes, CJK pair and GB four-byte grids, state boundaries,
+// malformed input, and seeded streams; see its README for corpus details.
+// Select the backend with the better valid-input mappings, then compare
+// invalid-input recovery. Prefer NLS when ICU offers no improvement or
+// regresses valid input.
+//
+// Scores below count inputs whose entire output matches the WHATWG oracle,
+// split by whether that input was valid. They describe the named probe
+// groups on the installed NLS/ICU data, not arbitrary streams or an
+// ICU-preferred route when it falls back to NLS.
+fn codepage_backend(codepage: u32) -> Option<CodepageBackend> {
+    Some(match codepage {
+        // ISO-8859-10: no NLS page; ICU matches all 256 single bytes.
+        28600 => CodepageBackend::IcuRequired("ISO-8859-10"),
+        // ISO-8859-14: no NLS page; ICU matches all 256 single bytes.
+        28604 => CodepageBackend::IcuRequired("ISO-8859-14"),
+        // EUC-JP: no NLS page. ICU matches 7,336/7,336 valid A1..FE pairs
+        // and all valid SS2/SS3 inputs, but only 4/193 invalid SS2 inputs;
+        // malformed-input recovery differs from WHATWG.
+        51932 => CodepageBackend::IcuRequired("EUC-JP"),
+
+        // ISO-8859-3: both match 249/249 valid bytes; ICU matches 7/7
+        // invalid bytes vs NLS 0/7.
+        28593 => CodepageBackend::IcuPreferred("ISO-8859-3"),
+        // ISO-8859-6: both match 211/211 valid bytes; ICU matches 45/45
+        // invalid bytes vs NLS 0/45.
+        28596 => CodepageBackend::IcuPreferred("ISO-8859-6"),
+        // ISO-8859-7: ICU matches 253/253 valid and 3/3 invalid bytes;
+        // NLS matches 248/253 valid and 0/3 invalid bytes.
+        28597 => CodepageBackend::IcuPreferred("ISO-8859-7"),
+        // ISO-8859-8: ICU matches 220/220 valid and 36/36 invalid bytes;
+        // NLS matches 217/220 valid and 0/36 invalid bytes.
+        28598 => CodepageBackend::IcuPreferred("ISO-8859-8"),
+        // ISO-8859-8-I: same WHATWG index and ICU scores as ISO-8859-8;
+        // NLS CP38598 also matches only 217/220 valid, 0/36 invalid.
+        38598 => CodepageBackend::IcuPreferred("ISO-8859-8"),
+        // macintosh: ICU matches 256/256 valid bytes vs NLS 255/256;
+        // NLS maps BD to U+2126 instead of WHATWG U+03A9.
+        10000 => CodepageBackend::IcuPreferred("macintosh"),
+        // windows-1253: both match 253/253 valid bytes; ICU matches
+        // 2/3 invalid bytes vs NLS 0/3.
+        1253 => CodepageBackend::IcuPreferred("windows-1253"),
+        // windows-1257: both match 254/254 valid bytes; ICU matches
+        // 2/2 invalid bytes vs NLS 0/2.
+        1257 => CodepageBackend::IcuPreferred("windows-1257"),
+        // x-mac-cyrillic: ICU matches 256/256 valid bytes vs NLS 255/256;
+        // NLS maps FF to a currency sign instead of WHATWG euro.
+        10017 => CodepageBackend::IcuPreferred("x-mac-cyrillic"),
+        // GBK uses the WHATWG gb18030 decoder, not ICU's "GBK" table.
+        // On valid pairs ICU gb18030 matches 23,921/23,940 vs NLS
+        // CP936 23,839/23,940; ICU misses 19 pairs and the valid 80/euro
+        // singleton, which NLS gets right.
+        936 => CodepageBackend::IcuPreferred("gb18030"),
+        // gb18030: ICU matches 23,921/23,940 valid pairs vs NLS CP54936
+        // 23,920/23,940. On the complete four-byte grid ICU matches
+        // 1,087,996/1,087,996 valid and 499,604/499,604 invalid pointers;
+        // NLS matches 1,087,995 valid and no invalid pointers. ICU still
+        // misdecodes 19 assigned pairs and the valid 80/euro singleton.
+        54936 => CodepageBackend::IcuPreferred("gb18030"),
+        // Big5: ICU Big5-HKSCS matches 18,433/18,594 valid pairs vs
+        // NLS CP950 13,502/18,594, and 416/1,188 invalid pairs vs
+        // NLS 0/1,188. Neither handles the four special two-scalar
+        // WHATWG mappings included in the valid-pair count.
+        950 => CodepageBackend::IcuPreferred("Big5-HKSCS"),
+        // EUC-KR includes UHC extensions: ICU "windows-949" matches
+        // 17,048/17,048 valid pairs vs NLS CP51949 8,225/17,048 and
+        // ICU "EUC-KR" 8,224/17,048. ICU windows-949 matches 2,498/6,892
+        // invalid pairs vs NLS 0/6,892; recovery is still incomplete.
+        51949 => CodepageBackend::IcuPreferred("windows-949"),
+        // IBM866: NLS matches 256/256 valid bytes vs ICU 253/256;
+        // ICU misdecodes three assigned control bytes.
+        866 => CodepageBackend::Nls,
+        // ISO-8859-2: NLS matches all 256 single bytes.
+        28592 => CodepageBackend::Nls,
+        // ISO-8859-4: NLS matches all 256 single bytes.
+        28594 => CodepageBackend::Nls,
+        // ISO-8859-5: NLS matches all 256 single bytes.
+        28595 => CodepageBackend::Nls,
+        // ISO-8859-13: NLS matches all 256 single bytes.
+        28603 => CodepageBackend::Nls,
+        // ISO-8859-15: NLS matches all 256 single bytes.
+        28605 => CodepageBackend::Nls,
+        // KOI8-R: NLS matches all 256 single bytes.
+        20866 => CodepageBackend::Nls,
+        // KOI8-U: NLS matches 256/256 valid bytes vs ICU 254/256.
+        21866 => CodepageBackend::Nls,
+        // windows-874: both ICU "ibm-1162" and NLS match 248/248 valid
+        // bytes, but ICU matches 8/8 invalid vs NLS 0/8. The probe's
+        // two-byte grid and seeded streams also match through ibm-1162.
+        874 => CodepageBackend::IcuPreferred("ibm-1162"),
+        // windows-1250: NLS matches all 256 single bytes.
+        1250 => CodepageBackend::Nls,
+        // windows-1251: NLS matches all 256 single bytes.
+        1251 => CodepageBackend::Nls,
+        // windows-1252: NLS matches all 256 single bytes. WHATWG aliases
+        // latin1 and ascii labels here, not to ISO-8859-1 or 7-bit ASCII.
+        1252 => CodepageBackend::Nls,
+        // windows-1254: NLS matches all 256 single bytes.
+        1254 => CodepageBackend::Nls,
+        // windows-1255: NLS matches 246/246 valid bytes vs ICU 245/246;
+        // ICU matches 10/10 invalid bytes vs NLS 0/10, but loses the
+        // assigned CA -> U+05BA mapping. // spellchecker:disable-line
+        1255 => CodepageBackend::Nls,
+        // windows-1256: NLS matches all 256 single bytes.
+        1256 => CodepageBackend::Nls,
+        // windows-1258: NLS matches all 256 single bytes.
+        1258 => CodepageBackend::Nls,
+        // ISO-2022-JP: ICU matches 7,336/7,336 valid JIS0208-1983
+        // inputs vs NLS CP50220 6,946/7,336; for the escape-prefix
+        // grid ICU matches 65,261/65,533 invalid vs NLS 0/65,533.
+        // ICU still accepts some malformed escapes (e.g. Q ESC ( H Z)
+        // without WHATWG's replacement character.
+        50220 => CodepageBackend::IcuPreferred("ISO-2022-JP"),
+        // Shift_JIS: both match 9,604/9,604 valid pairs, but NLS
+        // matches 192/192 valid singletons vs ICU 188/192. ICU matches
+        // 1,184/1,676 invalid pairs vs NLS 0/1,676; retain the
+        // correct assigned-byte mappings despite worse recovery.
+        932 => CodepageBackend::Nls,
+        _ => return None,
+    })
+}
+
+fn decode_icu_preferred(
+    codepage: u32,
+    icu_name: &str,
+    data: &[u8],
+    try_icu: impl FnOnce(&str, &[u8]) -> Result<Option<String>, Error>,
+    decode_nls: impl FnOnce(u32, &[u8]) -> Result<String, Error>,
+) -> Result<String, Error> {
+    match try_icu(icu_name, data)? {
+        Some(decoded) => Ok(decoded),
+        None => {
+            warn!(codepage, icu = icu_name, "ICU unavailable; using NLS charset decoder");
+            decode_nls(codepage, data)
+        }
     }
 }
 
@@ -481,7 +635,7 @@ mod tests {
             ("UTF-16BE", "utf-16be", &[0x00, 0x48, 0x00, 0x69], "Hi"),
             ("UTF-16LE", "utf-16le", &[0x48, 0x00, 0x69, 0x00], "Hi"),
             ("x-user-defined", "x-user-defined", &[0x48, 0x80, 0xFF], "H\u{F780}\u{F7FF}"),
-            // -- NLS (MultiByteToWideChar) --------------------------
+            // -- NLS and ICU-preferred encodings -----------------
             (
                 "IBM866",
                 "ibm866",
@@ -528,11 +682,11 @@ mod tests {
             ("ISO-2022-JP", "iso-2022-jp", &[0x1B, 0x24, 0x42, 0x46, 0x7C], "\u{65E5}"),
             ("Shift_JIS", "shift_jis", &[0x82, 0xB1], "\u{3053}"),
             ("EUC-KR", "euc-kr", &[0xC7, 0xD1], "\u{D55C}"),
-            // -- ICU fallback (Windows 10 1903+) -----------------
+            // -- ICU-required encodings (require Windows 10 1903+)
             ("ISO-8859-10", "iso-8859-10", &[0xA1, 0xA2], "\u{0104}\u{0112}"),
             ("ISO-8859-14", "iso-8859-14", &[0xA1, 0xD0], "\u{1E02}\u{0174}"),
             ("EUC-JP", "euc-jp", &[0xC6, 0xFC, 0xCB, 0xDC, 0xB8, 0xEC], "\u{65E5}\u{672C}\u{8A9E}"),
-            // -- Compile-time lookup table --------------------------
+            // -- Compile-time lookup table -----------------------
             ("ISO-8859-16", "iso-8859-16", &[0xAA, 0xBA], "\u{0218}\u{0219}"),
         ];
 
@@ -541,6 +695,88 @@ mod tests {
             let result =
                 decode_body(data, label).unwrap_or_else(|e| panic!("{name} ({label}): {e}"));
             assert_eq!(result, expected, "{name} ({label})");
+        }
+    }
+
+    #[test]
+    fn preferred_icu_falls_back_only_when_unavailable() {
+        use std::cell::Cell;
+
+        let cases: &[(u32, &str, &[u8], &str)] = &[
+            (28597, "ISO-8859-7", &[0xA4], "\u{20AC}"),
+            (874, "ibm-1162", &[0xDB], "\u{FFFD}"),
+            (50220, "ISO-2022-JP", b"\x1B$B!A\x1B(B", "\u{FF5E}"),
+        ];
+        for &(codepage, name, data, expected) in cases {
+            let nls_called = Cell::new(false);
+            let decoded = decode_icu_preferred(
+                codepage,
+                name,
+                data,
+                |converter, input| {
+                    assert_eq!((converter, input), (name, data));
+                    Ok(Some(expected.to_owned()))
+                },
+                |_, _| {
+                    nls_called.set(true);
+                    Ok(String::new())
+                },
+            )
+            .expect("ICU decode");
+            assert_eq!(decoded, expected, "{name}");
+            assert!(!nls_called.get(), "{name}");
+
+            let decoded = decode_icu_preferred(
+                codepage,
+                name,
+                data,
+                |_, _| Ok(None),
+                |page, input| {
+                    assert_eq!((page, input), (codepage, data));
+                    Ok("NLS fallback".to_owned())
+                },
+            )
+            .expect("NLS fallback");
+            assert_eq!(decoded, "NLS fallback", "{name}");
+
+            let error = decode_icu_preferred(
+                codepage,
+                name,
+                data,
+                |_, _| Err(Error::decode("ICU conversion failed")),
+                |_, _| {
+                    nls_called.set(true);
+                    Ok(String::new())
+                },
+            );
+            assert!(error.is_err(), "{name}");
+            assert!(!nls_called.get(), "{name}");
+        }
+    }
+
+    #[test]
+    fn preferred_icu_matches_selected_whatwg_mappings() {
+        if !abi::is_icu_available() {
+            eprintln!("skipping: icu.dll not available");
+            return;
+        }
+        let cases: &[(&str, &[u8], &str)] = &[
+            ("iso-8859-3", &[0xA5], "\u{FFFD}"),
+            ("iso-8859-6", &[0xA1], "\u{FFFD}"),
+            ("iso-8859-7", &[0xA4], "\u{20AC}"),
+            ("iso-8859-8-i", &[0xFD], "\u{200E}"),
+            ("macintosh", &[0xBD], "\u{03A9}"),
+            ("windows-874", &[0x80, 0xA1, 0xDB, 0xFC], "\u{20AC}\u{0E01}\u{FFFD}\u{FFFD}"),
+            ("x-mac-cyrillic", &[0xFF], "\u{20AC}"),
+            ("gbk", &[0xFE, 0x60], "\u{3918}"),
+            ("gb18030", &[0xFE, 0x60], "\u{3918}"),
+            ("big5", &[0x87, 0x40], "\u{43F0}"),
+            ("euc-kr", &[0x81, 0x41], "\u{AC02}"),
+            ("iso-2022-jp", b"\x1B$B!A\x1B(B", "\u{FF5E}"),
+            ("iso-2022-jp", b"\x1B$B!\x7F\x1B(B", "\u{FFFD}"),
+        ];
+        for &(label, data, expected) in cases {
+            assert_eq!(decode_body(data, label).expect(label), expected, "{label}");
         }
     }
 

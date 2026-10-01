@@ -4,13 +4,12 @@
 //!
 //! * [`multi_byte_to_string`] -- thin wrapper around
 //!   [`MultiByteToWideChar`](windows_sys::Win32::Globalization::MultiByteToWideChar)
-//!   for the 30 WHATWG encodings whose Windows code pages exist in the
-//!   NLS subsystem.
+//!   for NLS-provided encodings, and as a fallback for 15 ICU-preferred ones.
 //!
-//! * [`icu_decode`] -- dynamic-loading fallback through `icu.dll`
-//!   (Windows 10 1903+) for three WHATWG encodings whose code pages are
-//!   absent from NLS: ISO-8859-10 (CP 28600), ISO-8859-14 (CP 28604),
-//!   and EUC-JP (CP 51932).
+//! * [`icu_decode`] -- required ICU decoding for ISO-8859-10,
+//!   ISO-8859-14, and EUC-JP. [`icu_decode_if_available`] handles the
+//!   ICU-preferred encodings, returning `None` only when the library,
+//!   required exports, or named converter are unavailable.
 //!
 //! # Why not ISO-8859-16?
 //!
@@ -27,7 +26,7 @@
 
 use crate::{Error, util::string_from_utf16};
 use std::sync::OnceLock;
-use windows_sys::Win32::Globalization::MultiByteToWideChar;
+use windows_sys::Win32::Globalization::{MultiByteToWideChar, U_FILE_ACCESS_ERROR, U_ZERO_ERROR};
 
 // ===========================================================================
 // NLS: MultiByteToWideChar
@@ -88,14 +87,6 @@ pub(crate) fn multi_byte_to_string(codepage: u32, data: &[u8]) -> Result<String,
 // ===========================================================================
 // ICU: dynamic ucnv_* fallback
 // ===========================================================================
-
-// ---------------------------------------------------------------------------
-// ICU error-code constants
-// ---------------------------------------------------------------------------
-
-/// `U_ZERO_ERROR` -- success.  Negative values are warnings (still OK);
-/// positive values are errors.
-const U_ZERO_ERROR: i32 = 0;
 
 // ---------------------------------------------------------------------------
 // Function-pointer types (matching ICU4C's public C ABI)
@@ -192,14 +183,48 @@ pub(crate) fn icu_decode(converter_name: &str, data: &[u8]) -> Result<String, Er
     let icu = ICU.get_or_init(load_icu).as_ref().ok_or_else(|| {
         Error::decode(format!("charset \"{converter_name}\" requires icu.dll (Windows 10 1903+)"))
     })?;
+    decode_with_icu(icu, converter_name, data)?.ok_or_else(|| {
+        Error::decode(format!(
+            "ICU cannot open converter \"{converter_name}\" (error code {U_FILE_ACCESS_ERROR})"
+        ))
+    })
+}
 
+/// Try the system ICU converter. Only an unavailable library, export, or
+/// named converter permits an NLS fallback; decoding errors propagate.
+pub(crate) fn icu_decode_if_available(
+    converter_name: &str,
+    data: &[u8],
+) -> Result<Option<String>, Error> {
+    if data.is_empty() {
+        return Ok(Some(String::new()));
+    }
+    ICU.get_or_init(load_icu)
+        .as_ref()
+        .map(|icu| decode_with_icu(icu, converter_name, data))
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn decode_with_icu(
+    icu: &IcuFunctions,
+    converter_name: &str,
+    data: &[u8],
+) -> Result<Option<String>, Error> {
     // Null-terminate the converter name for ICU's C API.
     let name_buf: Vec<u8> = [converter_name.as_bytes(), &[0]].concat();
 
     // Open the converter.
     let mut open_err = U_ZERO_ERROR;
     let cnv = unsafe { (icu.ucnv_open)(name_buf.as_ptr(), &mut open_err) };
+    if cnv.is_null() && open_err == U_FILE_ACCESS_ERROR {
+        return Ok(None);
+    }
+    // ICU warnings are negative; positive status values are errors.
     if open_err > U_ZERO_ERROR || cnv.is_null() {
+        if !cnv.is_null() {
+            unsafe { (icu.ucnv_close)(cnv) };
+        }
         return Err(Error::decode(format!(
             "ICU cannot open converter \"{converter_name}\" (error code {open_err})"
         )));
@@ -241,7 +266,7 @@ pub(crate) fn icu_decode(converter_name: &str, data: &[u8]) -> Result<String, Er
     let len = usize::try_from(written).unwrap_or(0);
     buf.truncate(len);
 
-    string_from_utf16(&buf, "ICU produced invalid UTF-16")
+    string_from_utf16(&buf, "ICU produced invalid UTF-16").map(Some)
 }
 
 // ---------------------------------------------------------------------------
@@ -316,8 +341,13 @@ mod tests {
 
     #[test]
     fn icu_decode_errors_table() {
+        assert_eq!(
+            icu_decode_if_available("ISO-8859-16", &[0xA1]).expect("optional converter"),
+            None
+        );
+
         if !is_icu_available() {
-            eprintln!("skipping: icu.dll not available");
+            eprintln!("skipping required-ICU error cases: icu.dll not available");
             return;
         }
 

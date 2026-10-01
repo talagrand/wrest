@@ -252,15 +252,12 @@ impl Response {
     ///
     /// # Deviation from reqwest
     ///
-    /// reqwest uses `encoding_rs`; wrest uses pure Rust for UTF-8,
-    /// UTF-16LE/BE, `x-user-defined`, and `replacement`, while delegating
-    /// other available code pages to Windows `MultiByteToWideChar`.
-    /// ISO-8859-16 uses a Rust lookup table because neither Win32 nor
-    /// ICU supports it.
-    /// Three rare encodings -- ISO-8859-10 (Latin-6 / Nordic),
-    /// ISO-8859-14 (Latin-8 / Celtic), and EUC-JP (Extended Unix Code
-    /// for Japanese) -- use ICU via `icu.dll` on Windows 10 1903+;
-    /// older builds return a decode error for them.
+    /// reqwest uses `encoding_rs` for WHATWG decoding. wrest recognizes
+    /// all 39 encodings using Rust, system ICU, and Windows NLS, but native
+    /// mappings and malformed-input recovery can differ from WHATWG.
+    /// Three rare encodings -- ISO-8859-10, ISO-8859-14, and EUC-JP --
+    /// require system ICU on Windows 10 1903+; other ICU-provided encodings
+    /// fall back to NLS only when ICU is not available.
     pub async fn text(self) -> Result<String, Error> {
         self.text_with_charset("utf-8").await
     }
@@ -280,9 +277,9 @@ impl Response {
     ///
     /// # Deviation from reqwest
     ///
-    /// reqwest uses `encoding_rs`; wrest delegates to Win32 where
-    /// available, with Rust and ICU exceptions described in
-    /// [`text()`](Self::text).
+    /// reqwest uses `encoding_rs`; wrest's system converters can differ
+    /// from WHATWG on some mappings and malformed input (see
+    /// [`text()`](Self::text)).
     pub async fn text_with_charset(mut self, default_encoding: &str) -> Result<String, Error> {
         let charset = encoding::extract_charset_from_content_type(&self.headers)
             .unwrap_or_else(|| default_encoding.to_owned());
