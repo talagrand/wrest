@@ -146,7 +146,10 @@ fn fingerprint(inputs: &[Vec<u8>]) -> String {
         hash.update((input.len() as u64).to_le_bytes());
         hash.update(input);
     }
-    format!("{:x}", hash.finalize())
+    hash.finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn measure(group: Group, case: &Case, cli: &Cli, candidates: &[&str]) -> GroupReport {
