@@ -583,13 +583,13 @@ impl Url {
         })
     }
 
-    /// Update the query string and re-serialize the URL.
+    /// Update or clear the query string and re-serialize the URL.
     ///
     /// Replaces any existing query string. Updates `path_and_query` and
     /// `serialized` to stay consistent with the other fields.
     #[cfg_attr(all(not(feature = "query"), not(test)), expect(dead_code))]
-    pub(crate) fn set_query_string(&mut self, query: String) {
-        self.query = Some(query);
+    pub(crate) fn set_query(&mut self, query: Option<String>) {
+        self.query = query;
         self.rebuild_serialized();
     }
 
@@ -1332,42 +1332,51 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // -- set_query_string --
+    // -- set_query --
 
     #[test]
-    fn set_query_string_table() {
+    fn set_query_table() {
         // (input_url, new_query, expected_query, expected_as_str, expected_path_and_query, label)
-        let cases: &[(&str, &str, &str, &str, &str, &str)] = &[
+        type Case<'a> = (&'a str, Option<&'a str>, Option<&'a str>, &'a str, &'a str, &'a str);
+        let cases: &[Case<'_>] = &[
             (
                 "https://example.com/api",
-                "key=val",
-                "key=val",
+                Some("key=val"),
+                Some("key=val"),
                 "https://example.com/api?key=val",
                 "/api?key=val",
                 "adds query",
             ),
             (
                 "https://example.com:9443/api#frag",
-                "a=1&b=2",
-                "a=1&b=2",
+                Some("a=1&b=2"),
+                Some("a=1&b=2"),
                 "https://example.com:9443/api?a=1&b=2#frag",
                 "/api?a=1&b=2",
                 "with port and fragment",
             ),
             (
                 "https://example.com/api?old=1",
-                "new=2",
-                "new=2",
+                Some("new=2"),
+                Some("new=2"),
                 "https://example.com/api?new=2",
                 "/api?new=2",
                 "replaces existing",
+            ),
+            (
+                "https://example.com/api?#frag",
+                None,
+                None,
+                "https://example.com/api#frag",
+                "/api",
+                "clears query",
             ),
         ];
 
         for &(input, query, exp_query, exp_str, exp_pq, label) in cases {
             let mut url = Url::parse(input).unwrap();
-            url.set_query_string(query.to_owned());
-            assert_eq!(url.query(), Some(exp_query), "{label}: query()");
+            url.set_query(query.map(str::to_owned));
+            assert_eq!(url.query(), exp_query, "{label}: query()");
             assert_eq!(url.as_str(), exp_str, "{label}: as_str()");
             assert_eq!(url.path_and_query, exp_pq, "{label}: path_and_query");
         }

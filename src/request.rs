@@ -377,11 +377,18 @@ impl RequestBuilder {
         };
 
         if let Ok(ref mut url) = self.url {
+            if query_str.is_empty() {
+                if url.query.as_deref() == Some("") {
+                    url.set_query(None);
+                }
+                return self;
+            }
+
             let new_query = match &url.query {
                 Some(existing) if !existing.is_empty() => format!("{existing}&{query_str}"),
                 Some(_) | None => query_str,
             };
-            url.set_query_string(new_query);
+            url.set_query(Some(new_query));
         }
         self
     }
@@ -778,48 +785,101 @@ mod tests {
 
     #[cfg(feature = "query")]
     #[test]
-    fn query_appends_params() {
-        let rb = bare_client()
-            .get("https://example.com/api")
-            .query(&[("key", "val"), ("a", "b")]);
-        let clone = rb.try_clone().unwrap();
-        let url = clone.url.unwrap();
-        assert_eq!(url.query(), Some("key=val&a=b"));
-    }
+    fn query_success_table() {
+        type Params = &'static [(&'static str, &'static str)];
+        struct Case {
+            label: &'static str,
+            input: &'static str,
+            batches: &'static [Params],
+            expected_query: Option<&'static str>,
+            expected_url: &'static str,
+        }
 
-    #[cfg(feature = "query")]
-    #[test]
-    fn query_called_twice_appends() {
-        let rb = bare_client()
-            .get("https://example.com/api")
-            .query(&[("key", "val")])
-            .query(&[("a", "b")]);
-        let clone = rb.try_clone().unwrap();
-        let url = clone.url.unwrap();
-        assert_eq!(url.query(), Some("key=val&a=b"));
-    }
+        const EMPTY: Params = &[];
+        const KEY_VAL: Params = &[("key", "val")];
+        const A_B: Params = &[("a", "b")];
+        const KEY_VAL_A_B: Params = &[("key", "val"), ("a", "b")];
+        const ADDED: Params = &[("added", "2")];
 
-    #[cfg(feature = "query")]
-    #[test]
-    fn query_with_existing_query() {
-        let rb = bare_client()
-            .get("https://example.com/api?existing=1")
-            .query(&[("added", "2")]);
-        let clone = rb.try_clone().unwrap();
-        let url = clone.url.unwrap();
-        assert_eq!(url.query(), Some("existing=1&added=2"));
-    }
+        let cases = [
+            Case {
+                label: "adds parameters",
+                input: "https://example.com/api",
+                batches: &[KEY_VAL_A_B],
+                expected_query: Some("key=val&a=b"),
+                expected_url: "https://example.com/api?key=val&a=b",
+            },
+            Case {
+                label: "multiple calls append",
+                input: "https://example.com/api",
+                batches: &[KEY_VAL, A_B],
+                expected_query: Some("key=val&a=b"),
+                expected_url: "https://example.com/api?key=val&a=b",
+            },
+            Case {
+                label: "appends to existing query",
+                input: "https://example.com/api?existing=1",
+                batches: &[ADDED],
+                expected_query: Some("existing=1&added=2"),
+                expected_url: "https://example.com/api?existing=1&added=2",
+            },
+            Case {
+                label: "replaces explicitly empty query",
+                input: "https://example.com/api?",
+                batches: &[ADDED],
+                expected_query: Some("added=2"),
+                expected_url: "https://example.com/api?added=2",
+            },
+            Case {
+                label: "empty parameters leave absent query absent",
+                input: "https://example.com/api",
+                batches: &[EMPTY],
+                expected_query: None,
+                expected_url: "https://example.com/api",
+            },
+            Case {
+                label: "empty parameters clear explicitly empty query",
+                input: "https://example.com/api?",
+                batches: &[EMPTY],
+                expected_query: None,
+                expected_url: "https://example.com/api",
+            },
+            Case {
+                label: "empty parameters preserve nonempty query",
+                input: "https://example.com/api?existing=1",
+                batches: &[EMPTY],
+                expected_query: Some("existing=1"),
+                expected_url: "https://example.com/api?existing=1",
+            },
+            Case {
+                label: "empty parameters clear query before fragment",
+                input: "https://example.com/api?#frag",
+                batches: &[EMPTY],
+                expected_query: None,
+                expected_url: "https://example.com/api#frag",
+            },
+            Case {
+                label: "preserves port and fragment",
+                input: "https://example.com:9443/api#frag",
+                batches: &[KEY_VAL],
+                expected_query: Some("key=val"),
+                expected_url: "https://example.com:9443/api?key=val#frag",
+            },
+        ];
 
-    #[cfg(feature = "query")]
-    #[test]
-    fn query_with_explicitly_empty_query() {
-        let rb = bare_client()
-            .get("https://example.com/api?")
-            .query(&[("added", "2")]);
-        let clone = rb.try_clone().unwrap();
-        let url = clone.url.unwrap();
-        assert_eq!(url.query(), Some("added=2"));
-        assert_eq!(url.as_str(), "https://example.com/api?added=2");
+        for case in cases {
+            let mut rb = bare_client().get(case.input);
+            for batch in case.batches {
+                rb = rb.query(*batch);
+            }
+            let url = rb
+                .try_clone()
+                .expect("request should clone")
+                .url
+                .expect("URL should parse");
+            assert_eq!(url.query(), case.expected_query, "{}: query", case.label);
+            assert_eq!(url.as_str(), case.expected_url, "{}: URL", case.label);
+        }
     }
 
     // -- form() --
@@ -1381,20 +1441,6 @@ mod tests {
         let body = String::from_utf8(clone.body.unwrap().as_bytes().unwrap().to_vec()).unwrap();
         assert!(body.contains("name=alice"), "should contain name");
         assert!(!body.contains("optional"), "null field should be skipped");
-    }
-
-    // -- query() URL serialization consistency --
-
-    #[cfg(feature = "query")]
-    #[test]
-    fn query_serialization_with_port_and_fragment() {
-        let rb = bare_client()
-            .get("https://example.com:9443/api#frag")
-            .query(&[("key", "val")]);
-        let clone = rb.try_clone().unwrap();
-        let url = clone.url.unwrap();
-        assert_eq!(url.as_str(), "https://example.com:9443/api?key=val#frag");
-        assert_eq!(url.query(), Some("key=val"));
     }
 
     // -- http::Request <-> Request round-trip --
