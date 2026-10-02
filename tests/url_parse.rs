@@ -2,8 +2,8 @@
 //! test suite from [web-platform-tests](https://github.com/web-platform-tests/wpt).
 //!
 //! Each test case is classified as either:
-//! - **RFC-clean**: well-formed RFC 3986 input whose component meaning is
-//!   directly comparable with WHATWG. Zero failures expected.
+//! - **RFC-comparable**: well-formed RFC 3986 input whose component meaning
+//!   is directly comparable with WHATWG. Zero failures expected.
 //! - **Error-recovery**: invalid or edge-case input where behavior differs
 //!   between strict RFC parsing and WHATWG. Divergences are tracked but not
 //!   failures.
@@ -22,13 +22,65 @@
 use wrest::Url;
 
 // Pin the corpus so upstream expectation changes cannot break CI without a code change.
-// This is the last revision before WPT b63305b changed `xn--` A-label
-// expectations, which affect reqwest itself.
+// To refresh, bump to a newer tag from https://github.com/web-platform-tests/wpt
+// (tags under `epochs/weekly/`).
 const URLTESTDATA_URL: &str = concat!(
     "https://raw.githubusercontent.com/web-platform-tests/wpt/",
-    "f28876b96acf16e0408b9cce4bd3b40a729375d4",
+    "epochs/weekly/2026-09-28_05H",
     "/url/resources/urltestdata.json"
 );
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum UrlTestEntry {
+    Test(UrlTestCase),
+    #[expect(dead_code, reason = "WPT comment text is intentionally ignored")]
+    Comment(String),
+}
+
+#[derive(serde::Deserialize)]
+struct UrlTestCase {
+    input: String,
+    #[serde(default)]
+    base: Option<String>,
+    #[serde(default)]
+    failure: bool,
+    #[serde(default)]
+    protocol: String,
+    #[serde(default)]
+    hostname: String,
+    #[serde(default)]
+    port: String,
+    #[serde(default)]
+    pathname: String,
+    #[serde(default)]
+    search: String,
+    #[serde(default)]
+    hash: String,
+}
+
+#[derive(Clone, Copy)]
+#[expect(
+    dead_code,
+    reason = "each backend constructs only its applicable difference variants"
+)]
+enum KnownDifference {
+    ParseFailure {
+        input: &'static str,
+    },
+    Hostname {
+        input: &'static str,
+        expected: &'static str,
+    },
+}
+
+impl KnownDifference {
+    fn input(self) -> &'static str {
+        match self {
+            Self::ParseFailure { input } | Self::Hostname { input, .. } => input,
+        }
+    }
+}
 
 /// Fetch the WHATWG `urltestdata.json` from GitHub and run every applicable
 /// test case against `wrest::Url::parse`.
@@ -53,76 +105,85 @@ async fn whatwg_urltestdata() {
     );
 
     let body = resp.text().await.expect("failed to read response body");
-    let entries: Vec<serde_json::Value> =
+    let entries: Vec<UrlTestEntry> =
         serde_json::from_str(&body).expect("failed to parse urltestdata.json");
+    let object_test_cases = entries
+        .iter()
+        .filter(|entry| matches!(entry, UrlTestEntry::Test(_)))
+        .count();
+    assert_known_differences(&entries);
 
-    let mut tested = 0u32;
-    let mut skipped = 0u32;
-    let mut rfc_clean_tested = 0u32;
-    let mut rfc_clean_failures: Vec<String> = Vec::new();
-    let mut error_recovery_divergences = 0u32;
+    let mut tested = 0usize;
+    let mut skipped = SkipCounts::default();
+    let mut rfc_comparable_tested = 0usize;
+    let mut rfc_comparable_failures: Vec<String> = Vec::new();
+    let mut error_recovery_divergences = 0usize;
 
     for entry in &entries {
-        let Some(obj) = entry.as_object() else {
-            continue; // skip comment strings
+        let case = match entry {
+            UrlTestEntry::Test(case) => case,
+            UrlTestEntry::Comment(_) => continue,
         };
 
         // Skip relative-URL tests (base != null).
-        match obj.get("base") {
-            Some(serde_json::Value::Null) => {}
-            None => {}
-            _ => {
-                skipped += 1;
-                continue;
-            }
+        if case.base.is_some() {
+            skipped.relative_url += 1;
+            continue;
         }
 
-        let input = obj["input"].as_str().unwrap();
+        let input = case.input.as_str();
 
         // Expected-failure tests.
-        if obj.contains_key("failure") {
+        if case.failure {
             if input.starts_with("http://") || input.starts_with("https://") {
                 if Url::parse(input).is_ok() {
                     error_recovery_divergences += 1;
                 }
                 tested += 1;
             } else {
-                skipped += 1;
+                skipped.non_http_failure += 1;
             }
             continue;
         }
 
         // Only test http/https success cases.
-        let protocol = obj.get("protocol").and_then(|v| v.as_str()).unwrap_or("");
+        let protocol = case.protocol.as_str();
         if protocol != "http:" && protocol != "https:" {
-            skipped += 1;
+            skipped.non_http_success += 1;
             continue;
         }
 
-        let is_rfc_clean = is_rfc_clean_input(input);
+        let is_rfc_comparable = is_rfc_comparable_input(input);
 
         let parsed = match Url::parse(input) {
             Ok(u) => u,
             Err(e) => {
-                if is_rfc_clean {
-                    rfc_clean_failures
-                        .push(format!("parse failed for RFC-clean URL {input:?}: {e}"));
+                if is_rfc_comparable {
+                    rfc_comparable_failures
+                        .push(format!("parse failed for RFC-comparable URL {input:?}: {e}"));
                 } else {
                     error_recovery_divergences += 1;
                 }
-                if is_rfc_clean {
-                    rfc_clean_tested += 1;
+                if is_rfc_comparable {
+                    rfc_comparable_tested += 1;
                 }
                 tested += 1;
                 continue;
             }
         };
 
-        let expected_path = obj["pathname"].as_str().unwrap();
-        let expected_search = obj["search"].as_str().unwrap();
-        let expected_hash = obj["hash"].as_str().unwrap();
+        let expected_path = case.pathname.as_str();
+        let expected_search = case.search.as_str();
+        let expected_hash = case.hash.as_str();
+        let expected_hostname = case.hostname.as_str();
+        let expected_port = case.port.as_str();
 
         let path_ok = components_equivalent(parsed.path(), expected_path);
+        let hostname_ok = parsed.host_str() == Some(expected_hostname);
+        let port_ok = match expected_port {
+            "" => parsed.port().is_none(),
+            port => port.parse::<u16>().ok() == parsed.port(),
+        };
         let actual_search = match parsed.query() {
             Some(q) => format!("?{q}"),
             None => String::new(),
@@ -134,9 +195,14 @@ async fn whatwg_urltestdata() {
         };
         let hash_ok = components_equivalent(&actual_hash, expected_hash);
 
-        if !path_ok || !search_ok || !hash_ok {
+        if !hostname_ok || !port_ok || !path_ok || !search_ok || !hash_ok {
             let msg = format!(
-                "{input:?}: path={:?}(exp {:?}), search={:?}(exp {:?}), hash={:?}(exp {:?})",
+                "{input:?}: hostname={:?}(exp {:?}), port={:?}(exp {:?}), \
+                 path={:?}(exp {:?}), search={:?}(exp {:?}), hash={:?}(exp {:?})",
+                parsed.host_str(),
+                expected_hostname,
+                parsed.port(),
+                expected_port,
                 parsed.path(),
                 expected_path,
                 actual_search,
@@ -144,35 +210,163 @@ async fn whatwg_urltestdata() {
                 actual_hash,
                 expected_hash,
             );
-            if is_rfc_clean {
-                rfc_clean_failures.push(msg);
+            if is_rfc_comparable {
+                rfc_comparable_failures.push(msg);
             } else {
                 error_recovery_divergences += 1;
             }
         }
 
-        if is_rfc_clean {
-            rfc_clean_tested += 1;
+        if is_rfc_comparable {
+            rfc_comparable_tested += 1;
         }
         tested += 1;
     }
 
+    let skipped = skipped.total();
     eprintln!(
         "WHATWG urltestdata: {tested} tested, {skipped} skipped, \
-         {rfc_clean_tested} RFC-clean, \
+         {rfc_comparable_tested} RFC-comparable, \
          {error_recovery_divergences} error-recovery divergences"
     );
 
-    assert!(tested >= 100, "too few tests ran: {tested}");
-    assert!(rfc_clean_tested >= 40, "too few RFC-clean tests: {rfc_clean_tested}");
-
-    // RFC-clean URLs MUST match exactly -- zero failures.
-    assert!(
-        rfc_clean_failures.is_empty(),
-        "RFC-clean URLs had {} failures:\n{}",
-        rfc_clean_failures.len(),
-        rfc_clean_failures.join("\n")
+    assert_eq!(
+        tested + skipped,
+        object_test_cases,
+        "every object test case must be exercised or deliberately skipped"
     );
+    assert!(tested >= 100, "too few corpus cases were exercised: {tested}");
+    assert!(
+        rfc_comparable_tested >= 40,
+        "too few RFC-comparable corpus cases were exercised: {rfc_comparable_tested}"
+    );
+
+    // RFC-comparable URLs MUST match exactly -- zero failures.
+    assert!(
+        rfc_comparable_failures.is_empty(),
+        "RFC-comparable URLs had {} failures:\n{}",
+        rfc_comparable_failures.len(),
+        rfc_comparable_failures.join("\n")
+    );
+}
+
+#[derive(Default)]
+struct SkipCounts {
+    relative_url: usize,
+    non_http_failure: usize,
+    non_http_success: usize,
+}
+
+impl SkipCounts {
+    fn total(&self) -> usize {
+        self.relative_url
+            .checked_add(self.non_http_failure)
+            .and_then(|total| total.checked_add(self.non_http_success))
+            .expect("skip count overflow")
+    }
+}
+
+fn is_rfc_comparable_input(input: &str) -> bool {
+    is_rfc_clean_input(input) && known_difference(input).is_none()
+}
+
+fn known_difference(input: &str) -> Option<KnownDifference> {
+    known_differences()
+        .iter()
+        .copied()
+        .find(|difference| difference.input() == input)
+}
+
+fn assert_known_differences(entries: &[UrlTestEntry]) {
+    for difference in known_differences().iter().copied() {
+        let input = difference.input();
+        let case = entries
+            .iter()
+            .find_map(|entry| match entry {
+                UrlTestEntry::Test(case) if case.input == input => Some(case),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("known difference is absent from the corpus: {input:?}"));
+        assert!(!case.failure, "{input}: corpus now expects parse failure");
+
+        match difference {
+            KnownDifference::ParseFailure { .. } => {
+                assert!(Url::parse(input).is_err(), "{input}: expected backend parse failure");
+            }
+            KnownDifference::Hostname { expected, .. } => {
+                assert_ne!(
+                    case.hostname, expected,
+                    "{input}: corpus hostname now matches the backend exception"
+                );
+                assert_eq!(
+                    Url::parse(input)
+                        .expect("known hostname difference should parse")
+                        .host_str(),
+                    Some(expected),
+                    "{input}: backend hostname difference"
+                );
+            }
+        }
+    }
+}
+
+fn known_differences() -> &'static [KnownDifference] {
+    #[cfg(native_winhttp)]
+    {
+        // WHATWG reinterprets these RFC registered names as legacy IPv4
+        // addresses. Wrest intentionally preserves the registered names.
+        &[
+            KnownDifference::Hostname {
+                input: "http://192.0x00A80001",
+                expected: "192.0x00a80001",
+            },
+            KnownDifference::Hostname {
+                input: "https://0x.0x.0",
+                expected: "0x.0x.0",
+            },
+            KnownDifference::Hostname {
+                input: "https://0x.0x.0x.0x",
+                expected: "0x.0x.0x.0x",
+            },
+            KnownDifference::Hostname {
+                input: "https://00.00.00.00",
+                expected: "00.00.00.00",
+            },
+            KnownDifference::Hostname {
+                input: "https://0000000000000000000000000000000000000000177.0.0.1",
+                expected: "0000000000000000000000000000000000000000177.0.0.1",
+            },
+        ]
+    }
+
+    #[cfg(not(native_winhttp))]
+    {
+        // Reqwest's current IDNA implementation rejects these RFC-comparable
+        // WPT cases instead of preserving the A-label as the corpus expects.
+        &[
+            KnownDifference::ParseFailure {
+                input: "http://a.b.c.xn--pokxncvks",
+            },
+            KnownDifference::ParseFailure {
+                input: "http://10.0.0.xn--pokxncvks",
+            },
+            KnownDifference::ParseFailure {
+                input: "http://a.b.c.XN--pokxncvks",
+            },
+            KnownDifference::ParseFailure {
+                input: "http://a.b.c.Xn--pokxncvks",
+            },
+            KnownDifference::ParseFailure {
+                input: "http://10.0.0.XN--pokxncvks",
+            },
+            KnownDifference::ParseFailure {
+                input: "http://10.0.0.xN--pokxncvks",
+            },
+            KnownDifference::ParseFailure {
+                input: "https://xn--/",
+            },
+        ]
+    }
 }
 
 /// Returns `true` if `input` is a syntactically valid RFC URI whose
@@ -213,6 +407,28 @@ fn is_rfc_clean_input(input: &str) -> bool {
     true
 }
 
+#[test]
+fn rfc_comparable_classifier_table() {
+    let cases = [
+        ("https://example.com:8443/path?query#fragment", true),
+        ("https://example.com/path/../next", false),
+        ("https://example.com/%zz", false),
+        ("https://example.com/#", false),
+    ];
+
+    for (input, expected) in cases {
+        assert_eq!(is_rfc_comparable_input(input), expected, "{input}");
+    }
+}
+
+#[test]
+fn known_differences_are_not_rfc_comparable() {
+    for difference in known_differences() {
+        let input = difference.input();
+        assert!(!is_rfc_comparable_input(input), "{input}");
+    }
+}
+
 fn has_invalid_percent_encoding(input: &str) -> bool {
     let mut bytes = input.as_bytes().iter().copied();
     while let Some(byte) = bytes.next() {
@@ -226,6 +442,19 @@ fn has_invalid_percent_encoding(input: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(native_winhttp)]
+#[test]
+fn known_hostname_differences_match_backend_policy() {
+    for difference in known_differences() {
+        let KnownDifference::Hostname { input, expected } = *difference else {
+            continue;
+        };
+
+        assert!(!is_rfc_comparable_input(input), "{input}: RFC-comparable filter");
+        assert_eq!(Url::parse(input).unwrap().host_str(), Some(expected), "{input}");
+    }
 }
 
 /// Compare two URL component strings, treating percent-encoded hex digits
