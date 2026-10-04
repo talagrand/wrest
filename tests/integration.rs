@@ -1196,35 +1196,75 @@ async fn head_returns_no_body() {
     assert!(body.is_empty(), "HEAD response body should be empty");
 }
 
-/// `redirect_followed`: 302 redirect is followed by default.
+/// `redirect_followed`: a cross-origin 302 is followed without forwarding sensitive headers.
 #[tokio::test]
 async fn redirect_followed() {
-    let server = MockServer::start().await;
+    let source = MockServer::start().await;
+    let destination = MockServer::start().await;
+    let truncated_prefix = format!("{}/new%", destination.uri());
+    let truncated_char_count = truncated_prefix.encode_utf16().count();
+    let redirect_char_count = truncated_char_count
+        .checked_mul(2)
+        .expect("redirect character count should fit in usize");
+    let redirect_string_len = redirect_char_count
+        .checked_sub(1)
+        .expect("redirect must include at least one character");
+    let valid_prefix = format!("{truncated_prefix}20");
+    let padding_len = redirect_string_len
+        .checked_sub(valid_prefix.encode_utf16().count())
+        .expect("redirect target should have room for padding");
+    let redirect_target = format!("{valid_prefix}{}", "x".repeat(padding_len));
+
+    // Shape the target so only the complete callback string is a valid URL:
+    // its halfway prefix ends immediately after `%`.
+    assert_eq!(
+        redirect_target
+            .encode_utf16()
+            .count()
+            .checked_add(1)
+            .expect("redirect character count should fit in usize"),
+        redirect_char_count
+    );
 
     Mock::given(method("GET"))
         .and(path("/old"))
-        .respond_with(
-            ResponseTemplate::new(302).append_header("Location", format!("{}/new", server.uri())),
-        )
+        .respond_with(ResponseTemplate::new(302).append_header("Location", redirect_target))
         .expect(1)
-        .mount(&server)
+        .mount(&source)
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/new"))
         .respond_with(ResponseTemplate::new(200).set_body_string("arrived"))
         .expect(1)
-        .mount(&server)
+        .mount(&destination)
         .await;
 
     let resp = test_client()
-        .get(format!("{}/old", server.uri()))
+        .get(format!("{}/old", source.uri()))
+        .bearer_auth("secret-token")
+        .header("Cookie", "session=secret")
         .send()
         .await
         .expect("redirect should be followed");
 
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(resp.text().await.unwrap(), "arrived");
+
+    let requests = destination
+        .received_requests()
+        .await
+        .expect("destination request recording should be enabled");
+    let request = requests
+        .first()
+        .expect("destination should receive the redirected request");
+    assert!(
+        !request.headers.contains_key("authorization"),
+        "Authorization must be stripped on a cross-origin redirect"
+    );
+    assert!(
+        !request.headers.contains_key("cookie"),
+        "Cookie must be stripped on a cross-origin redirect"
+    );
 }
 
 /// `redirect_blocked`: Policy::none() prevents redirect following.

@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Charset decoding: match WHATWG BOM precedence over declared charsets and UTF-16LE/BE replacement behavior for malformed surrogates and odd trailing bytes.
 - Charset decoding: prefer ICU in cases where it better matches WHATWG mappings, falling back to NLS when ICU is not available.
 - TLS: When configured, honor dangerous-invalid-certs setting for HTTPS destinations reached through HTTP-to-HTTPS redirects.
+- WinHTTP callbacks: prevent valid redirects from being rejected and DNS/server diagnostics from being truncated when decoding UTF-16 callback strings.
 
 ### Changed
 - CI - Supply chain: SHA-pin all external actions in CI.

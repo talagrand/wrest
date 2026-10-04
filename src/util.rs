@@ -10,29 +10,56 @@ use crate::{Error, error::ContextError};
 // Wide-string helpers
 // ---------------------------------------------------------------------------
 
-/// Read a null-terminated wide string from a raw pointer + byte length.
+/// Convert a wide-string pointer to a Rust `String`.
 ///
-/// This accepts a byte count (not a `u16` count) and uses lossy conversion --
-/// appropriate for WinHTTP callback info buffers where byte length is the
-/// convention and partial data is acceptable for diagnostic logging.
+/// When `char_count` is `Some`, it is the number of readable `u16` elements
+/// and one optional trailing NUL is removed. When it is `None`, `ptr` is read
+/// through its first NUL. Uses [`String::from_utf16`] so malformed UTF-16 is
+/// surfaced as an error.
 ///
 /// # Safety
 ///
-/// `ptr` must be a valid pointer to at least `byte_len` bytes of `u16` data,
-/// or null (returns an empty string).
-pub(crate) unsafe fn wide_to_string_lossy(ptr: *mut std::ffi::c_void, byte_len: u32) -> String {
-    if ptr.is_null() || byte_len == 0 {
-        return String::new();
+/// For `Some(char_count)`, `ptr` must be valid for at least `char_count`
+/// elements. For `None`, it must point to a NUL-terminated string. A null
+/// pointer returns an empty string.
+pub(crate) unsafe fn wide_to_string(
+    ptr: *const u16,
+    char_count: Option<usize>,
+) -> Result<String, Error> {
+    let slice = unsafe { wide_slice(ptr, char_count) };
+    String::from_utf16(slice)
+        .map_err(|_| Error::request("WinHTTP returned invalid UTF-16 in callback string"))
+}
+
+/// Convert a wide-string pointer to a Rust `String` using lossy decoding.
+///
+/// `char_count` has the same counted-versus-NUL-terminated meaning as in
+/// [`wide_to_string`].
+///
+/// # Safety
+///
+/// The same pointer validity requirements as [`wide_to_string`] apply.
+#[cfg_attr(all(not(feature = "tracing"), not(test)), expect(dead_code))]
+pub(crate) unsafe fn wide_to_string_lossy(ptr: *const u16, char_count: Option<usize>) -> String {
+    String::from_utf16_lossy(unsafe { wide_slice(ptr, char_count) })
+}
+
+/// Return the UTF-16 contents selected by `char_count`, without a terminator.
+///
+/// # Safety
+///
+/// The caller must uphold the pointer contract documented by [`wide_to_string`].
+unsafe fn wide_slice<'a>(ptr: *const u16, char_count: Option<usize>) -> &'a [u16] {
+    if ptr.is_null() {
+        return &[];
     }
-    // byte_len is in bytes; each wchar is 2 bytes.
-    let wchar_count = (byte_len as usize) / 2;
-    let slice = unsafe { std::slice::from_raw_parts(ptr as *const u16, wchar_count) };
-    // Trim trailing null if present.
-    let slice = match slice.iter().position(|&c| c == 0) {
-        Some(pos) => slice.get(..pos).unwrap_or(slice),
-        None => slice,
+
+    let char_count = match char_count {
+        Some(char_count) => char_count,
+        None => unsafe { libc::wcslen(ptr) },
     };
-    String::from_utf16_lossy(slice)
+    let slice = unsafe { std::slice::from_raw_parts(ptr, char_count) };
+    slice.strip_suffix(&[0]).unwrap_or(slice)
 }
 
 // ---------------------------------------------------------------------------
@@ -123,36 +150,40 @@ pub(crate) fn narrow_latin1(s: &str) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    // -- wide_to_string_lossy --
-
     #[test]
-    fn wide_to_string_lossy_table() {
-        // Build test data that outlives the table references.
-        let ab: [u16; 2] = [b'A' as u16, b'B' as u16];
-        let ok_null: [u16; 3] = [b'O' as u16, b'K' as u16, 0];
+    fn wide_string_decoders() {
+        let hello = [b'H' as u16, b'e' as u16, b'l' as u16, b'l' as u16, b'o' as u16];
+        let ok_with_null_and_suffix = [b'O' as u16, b'K' as u16, 0, b'X' as u16];
+        let invalid_counted = [0xD800];
+        let invalid_null_terminated = [0xD800, 0];
 
-        // (ptr, byte_len, expected, label)
-        // SAFETY: all pointers are valid for their byte_len.
-        let cases: Vec<(*mut std::ffi::c_void, u32, &str, &str)> = vec![
-            (std::ptr::null_mut(), 10, "", "null_ptr"),
-            (ab.as_ptr() as *mut std::ffi::c_void, 0, "", "zero_len"),
-            (
-                ok_null.as_ptr() as *mut std::ffi::c_void,
-                6, // 3 u16 = 6 bytes
-                "OK",
-                "trims_trailing_null",
-            ),
-            (
-                ab.as_ptr() as *mut std::ffi::c_void,
-                4, // 2 u16 = 4 bytes
-                "AB",
-                "no_trailing_null",
-            ),
+        // (label, data, optional character count, expected)
+        let cases: &[(&str, *const u16, Option<usize>, &str)] = &[
+            ("null_ptr_counted", std::ptr::null(), Some(10), ""),
+            ("null_ptr_terminated", std::ptr::null(), None, ""),
+            ("zero_count", hello.as_ptr(), Some(0), ""),
+            ("counted_utf16", hello.as_ptr(), Some(5), "Hello"),
+            ("counted_trailing_null", ok_with_null_and_suffix.as_ptr(), Some(3), "OK"),
+            ("null_terminated_stops_at_first_null", ok_with_null_and_suffix.as_ptr(), None, "OK"),
         ];
 
-        for (ptr, byte_len, expected, label) in &cases {
-            let result = unsafe { wide_to_string_lossy(*ptr, *byte_len) };
-            assert_eq!(result, *expected, "wide_to_string_lossy {label}");
+        for &(label, ptr, char_count, expected) in cases {
+            let strict = unsafe { wide_to_string(ptr, char_count) }
+                .unwrap_or_else(|error| panic!("{label}: {error}"));
+            assert_eq!(strict, expected, "strict: {label}");
+
+            let lossy = unsafe { wide_to_string_lossy(ptr, char_count) };
+            assert_eq!(lossy, expected, "lossy: {label}");
+        }
+
+        for (label, ptr, char_count) in [
+            ("counted", invalid_counted.as_ptr(), Some(invalid_counted.len())),
+            ("null_terminated", invalid_null_terminated.as_ptr(), None),
+        ] {
+            let strict = unsafe { wide_to_string(ptr, char_count) };
+            assert!(strict.is_err(), "strict {label}: unpaired surrogate must fail");
+            let lossy = unsafe { wide_to_string_lossy(ptr, char_count) };
+            assert_eq!(lossy, "\u{FFFD}", "lossy {label}: unpaired surrogate is replaced");
         }
     }
 

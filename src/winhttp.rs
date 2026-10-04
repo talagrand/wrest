@@ -16,9 +16,12 @@ use crate::{
 };
 use bytes::BytesMut;
 use http::{StatusCode, Version};
-use std::sync::{
-    Arc, Condvar, Mutex,
-    atomic::{AtomicU32, Ordering},
+use std::{
+    mem::size_of,
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 use windows_sys::Win32::Networking::WinHttp::*;
 
@@ -273,7 +276,7 @@ impl RequestState {
 
     #[cfg(test)]
     pub fn new_test() -> Self {
-        Self::new(false, Origin::new("http", "test.local", 80))
+        Self::new(cfg!(feature = "tracing"), Origin::new("http", "test.local", 80))
     }
 
     fn enter_callback(&self) -> RequestCallbackGuard<'_> {
@@ -508,7 +511,8 @@ unsafe fn winhttp_callback_body(
         }
 
         WINHTTP_CALLBACK_STATUS_WRITE_COMPLETE => {
-            let bytes = if !lpv_info.is_null() && dw_info_length >= 4 {
+            // WRITE_COMPLETE reports dw_info_length in bytes.
+            let bytes = if !lpv_info.is_null() && dw_info_length as usize >= size_of::<u32>() {
                 unsafe { *(lpv_info as *const u32) }
             } else {
                 0
@@ -517,11 +521,12 @@ unsafe fn winhttp_callback_body(
         }
 
         WINHTTP_CALLBACK_STATUS_REQUEST_ERROR => {
+            // REQUEST_ERROR reports dw_info_length in bytes.
             // Guard against a buggy/short `lpv_info` delivery (deref of a
             // null or undersized pointer is UB). Fallback signals an
             // internal error so the awaiter doesn't hang.
             let code = if !lpv_info.is_null()
-                && dw_info_length as usize >= std::mem::size_of::<WINHTTP_ASYNC_RESULT>()
+                && dw_info_length as usize >= size_of::<WINHTTP_ASYNC_RESULT>()
             {
                 // SAFETY: null-checked above; payload is at least one struct
                 // worth of bytes per the length check.
@@ -533,14 +538,14 @@ unsafe fn winhttp_callback_body(
         }
 
         WINHTTP_CALLBACK_STATUS_SECURE_FAILURE => {
+            // SECURE_FAILURE reports dw_info_length in bytes.
             // Same null/short-buffer guard as REQUEST_ERROR.
-            let flags =
-                if !lpv_info.is_null() && dw_info_length as usize >= std::mem::size_of::<u32>() {
-                    // SAFETY: null-checked above; size verified.
-                    unsafe { *(lpv_info as *const u32) }
-                } else {
-                    0
-                };
+            let flags = if !lpv_info.is_null() && dw_info_length as usize >= size_of::<u32>() {
+                // SAFETY: null-checked above; size verified.
+                unsafe { *(lpv_info as *const u32) }
+            } else {
+                0
+            };
             // Release: pairs with the Acquire load in callback_error_to_error
             // so the executor thread observes the stored flags.  (On x86 this
             // compiles identically to Relaxed -- the stronger ordering is for
@@ -550,13 +555,22 @@ unsafe fn winhttp_callback_body(
         }
 
         WINHTTP_CALLBACK_STATUS_REDIRECT => {
-            // SAFETY: lpv_info is a null-terminated UTF-16 string; dw_info_length
-            // is the byte count.
-            let new_url = unsafe { crate::util::wide_to_string_lossy(lpv_info, dw_info_length) };
-            // Parse first so logs/errors only ever carry the redacted Url --
-            // Display strips userinfo, but the raw `new_url` may contain
-            // `user:pass@host` and must not be traced or embedded as-is.
-            match new_url.parse::<crate::url::Url>() {
+            // REDIRECT explicitly reports a UTF-16 character count:
+            // https://learn.microsoft.com/windows/win32/api/winhttp/nc-winhttp-winhttp_status_callback#parameters
+            let redirect_char_count = dw_info_length as usize;
+            let parsed =
+                unsafe { crate::util::wide_to_string(lpv_info.cast(), Some(redirect_char_count)) }
+                    .and_then(|new_url| {
+                        // Parse before logging so credentials in valid userinfo are
+                        // represented only by the redacted Url type.
+                        new_url.parse::<crate::url::Url>().map_err(|_| {
+                            Error::request(
+                                "WinHTTP redirect target is unparsable; aborting to avoid \
+                             leaking sensitive headers to an unclassifiable origin",
+                            )
+                        })
+                    });
+            match parsed {
                 Ok(parsed) => {
                     #[cfg(feature = "tracing")]
                     if state.verbose {
@@ -564,17 +578,10 @@ unsafe fn winhttp_callback_body(
                     }
                     strip_sensitive_headers_on_cross_origin_redirect(hinternet, state, &parsed);
                 }
-                Err(_) => {
-                    // Unparsable target -> can't classify origin ->
-                    // abort before WinHTTP sends sensitive headers on.
-                    // The raw target can't really be redacted, since it's unparsable
-                    state.abort_from_callback(
-                        hinternet,
-                        Error::request(format!(
-                            "WinHTTP redirect target is unparsable; aborting to avoid \
-                             leaking sensitive headers to an unclassifiable origin: {new_url}"
-                        )),
-                    );
+                Err(reason) => {
+                    // The target origin cannot be classified, so abort before
+                    // WinHTTP can forward sensitive headers.
+                    state.abort_from_callback(hinternet, reason);
                 }
             }
         }
@@ -600,29 +607,32 @@ unsafe fn winhttp_callback_body(
 /// - `REDIRECT`: redirect URL as PCWSTR
 /// - `SENDING_REQUEST` / `RECEIVING_RESPONSE` / `RESPONSE_RECEIVED`: no data
 #[cfg(feature = "tracing")]
-fn log_verbose_status(status: u32, info: *mut std::ffi::c_void, info_len: u32) {
+fn log_verbose_status(status: u32, info: *mut std::ffi::c_void, info_length: u32) {
     match status {
         WINHTTP_CALLBACK_STATUS_RESOLVING_NAME => {
-            let name = unsafe { crate::util::wide_to_string_lossy(info, info_len) };
+            // Diagnostic strings are NUL-terminated  LPWSTRs & do not define the unit of info_length.
+            let name = unsafe { crate::util::wide_to_string_lossy(info.cast(), None) };
             trace!(name = %name, "WinHTTP: resolving name");
         }
         WINHTTP_CALLBACK_STATUS_NAME_RESOLVED => {
-            let name = unsafe { crate::util::wide_to_string_lossy(info, info_len) };
+            let name = unsafe { crate::util::wide_to_string_lossy(info.cast(), None) };
             trace!(name = %name, "WinHTTP: name resolved");
         }
         WINHTTP_CALLBACK_STATUS_CONNECTING_TO_SERVER => {
-            let ip = unsafe { crate::util::wide_to_string_lossy(info, info_len) };
+            // Socket-address indications use the same NUL-terminated contract.
+            let ip = unsafe { crate::util::wide_to_string_lossy(info.cast(), None) };
             trace!(ip = %ip, "WinHTTP: connecting to server");
         }
         WINHTTP_CALLBACK_STATUS_CONNECTED_TO_SERVER => {
-            let ip = unsafe { crate::util::wide_to_string_lossy(info, info_len) };
+            let ip = unsafe { crate::util::wide_to_string_lossy(info.cast(), None) };
             trace!(ip = %ip, "WinHTTP: connected to server");
         }
         WINHTTP_CALLBACK_STATUS_SENDING_REQUEST => {
             trace!("WinHTTP: sending request");
         }
         WINHTTP_CALLBACK_STATUS_REQUEST_SENT => {
-            let bytes = if !info.is_null() && info_len >= 4 {
+            // REQUEST_SENT reports info_length in bytes.
+            let bytes = if !info.is_null() && info_length as usize >= size_of::<u32>() {
                 unsafe { *(info as *const u32) }
             } else {
                 0
@@ -633,7 +643,8 @@ fn log_verbose_status(status: u32, info: *mut std::ffi::c_void, info_len: u32) {
             trace!("WinHTTP: receiving response");
         }
         WINHTTP_CALLBACK_STATUS_RESPONSE_RECEIVED => {
-            let bytes = if !info.is_null() && info_len >= 4 {
+            // RESPONSE_RECEIVED reports info_length in bytes.
+            let bytes = if !info.is_null() && info_length as usize >= size_of::<u32>() {
                 unsafe { *(info as *const u32) }
             } else {
                 0
@@ -697,9 +708,9 @@ impl Origin {
 /// (and removal) is callable inside this callback before the redirected
 /// request goes on the wire (WinHTTP Security Considerations item 16).
 ///
-/// Fails closed: any strip failure aborts the request via
-/// [`RequestState::abort_from_callback`] so WinHTTP never sends
-/// `Authorization`/`Cookie`/etc. on to the new origin.
+/// Any strip failure aborts the request via
+/// [`RequestState::abort_from_callback`] before WinHTTP can send
+/// `Authorization`, `Cookie`, or other sensitive headers to the new origin.
 fn strip_sensitive_headers_on_cross_origin_redirect(
     request_handle: *mut core::ffi::c_void,
     state: &RequestState,
@@ -2247,9 +2258,14 @@ mod tests {
         Null,
         AsyncResult(WINHTTP_ASYNC_RESULT),
         U32(u32),
+        Wide(Vec<u16>),
     }
 
     impl LpvInfo {
+        fn wide(value: &str) -> Self {
+            Self::Wide(value.encode_utf16().chain(std::iter::once(0)).collect())
+        }
+
         /// Raw pointer borrowing from `self`; caller must keep `self` alive.
         fn as_ptr(&self) -> *mut std::ffi::c_void {
             match self {
@@ -2258,6 +2274,7 @@ mod tests {
                     (r as *const WINHTTP_ASYNC_RESULT) as *mut std::ffi::c_void
                 }
                 LpvInfo::U32(v) => (v as *const u32) as *mut std::ffi::c_void,
+                LpvInfo::Wide(value) => value.as_ptr().cast_mut().cast(),
             }
         }
     }
@@ -2308,6 +2325,9 @@ mod tests {
 
     #[test]
     fn winhttp_callback_dispatch_table() {
+        #[cfg(feature = "tracing")]
+        let _guard = ::tracing::subscriber::set_default(crate::tracing::SinkSubscriber);
+
         struct Case {
             label: &'static str,
             status: u32,
@@ -2464,7 +2484,39 @@ mod tests {
             },
             // Verbose-only statuses must not signal.
             Case {
-                label: "CONNECTING_TO_SERVER (verbose-only) -> no signal",
+                label: "RESOLVING_NAME with \"example.test\" (verbose-only) -> no signal",
+                status: WINHTTP_CALLBACK_STATUS_RESOLVING_NAME,
+                info_len: 0,
+                lpv_info: LpvInfo::wide("example.test"),
+                expected: DispatchOutcome::Pending,
+                expected_tls_flags: 0,
+            },
+            Case {
+                label: "RESOLVING_NAME with NULL lpv_info (verbose-only) -> no signal",
+                status: WINHTTP_CALLBACK_STATUS_RESOLVING_NAME,
+                info_len: 0,
+                lpv_info: LpvInfo::Null,
+                expected: DispatchOutcome::Pending,
+                expected_tls_flags: 0,
+            },
+            Case {
+                label: "NAME_RESOLVED with \"example.test\" (verbose-only) -> no signal",
+                status: WINHTTP_CALLBACK_STATUS_NAME_RESOLVED,
+                info_len: 0,
+                lpv_info: LpvInfo::wide("example.test"),
+                expected: DispatchOutcome::Pending,
+                expected_tls_flags: 0,
+            },
+            Case {
+                label: "CONNECTING_TO_SERVER with \"192.0.2.1\" (verbose-only) -> no signal",
+                status: WINHTTP_CALLBACK_STATUS_CONNECTING_TO_SERVER,
+                info_len: 0,
+                lpv_info: LpvInfo::wide("192.0.2.1"),
+                expected: DispatchOutcome::Pending,
+                expected_tls_flags: 0,
+            },
+            Case {
+                label: "CONNECTING_TO_SERVER with NULL lpv_info (verbose-only) -> no signal",
                 status: WINHTTP_CALLBACK_STATUS_CONNECTING_TO_SERVER,
                 info_len: 0,
                 lpv_info: LpvInfo::Null,
@@ -2472,8 +2524,56 @@ mod tests {
                 expected_tls_flags: 0,
             },
             Case {
-                label: "RESOLVING_NAME (verbose-only) -> no signal",
-                status: WINHTTP_CALLBACK_STATUS_RESOLVING_NAME,
+                label: "CONNECTED_TO_SERVER with \"192.0.2.1\" (verbose-only) -> no signal",
+                status: WINHTTP_CALLBACK_STATUS_CONNECTED_TO_SERVER,
+                info_len: 0,
+                lpv_info: LpvInfo::wide("192.0.2.1"),
+                expected: DispatchOutcome::Pending,
+                expected_tls_flags: 0,
+            },
+            Case {
+                label: "SENDING_REQUEST (verbose-only) -> no signal",
+                status: WINHTTP_CALLBACK_STATUS_SENDING_REQUEST,
+                info_len: 0,
+                lpv_info: LpvInfo::Null,
+                expected: DispatchOutcome::Pending,
+                expected_tls_flags: 0,
+            },
+            Case {
+                label: "REQUEST_SENT(123) (verbose-only) -> no signal",
+                status: WINHTTP_CALLBACK_STATUS_REQUEST_SENT,
+                info_len: crate::abi::dword_size_of::<u32>(),
+                lpv_info: LpvInfo::U32(123),
+                expected: DispatchOutcome::Pending,
+                expected_tls_flags: 0,
+            },
+            Case {
+                label: "REQUEST_SENT with NULL lpv_info (verbose-only) -> no signal",
+                status: WINHTTP_CALLBACK_STATUS_REQUEST_SENT,
+                info_len: 0,
+                lpv_info: LpvInfo::Null,
+                expected: DispatchOutcome::Pending,
+                expected_tls_flags: 0,
+            },
+            Case {
+                label: "RECEIVING_RESPONSE (verbose-only) -> no signal",
+                status: WINHTTP_CALLBACK_STATUS_RECEIVING_RESPONSE,
+                info_len: 0,
+                lpv_info: LpvInfo::Null,
+                expected: DispatchOutcome::Pending,
+                expected_tls_flags: 0,
+            },
+            Case {
+                label: "RESPONSE_RECEIVED(456) (verbose-only) -> no signal",
+                status: WINHTTP_CALLBACK_STATUS_RESPONSE_RECEIVED,
+                info_len: crate::abi::dword_size_of::<u32>(),
+                lpv_info: LpvInfo::U32(456),
+                expected: DispatchOutcome::Pending,
+                expected_tls_flags: 0,
+            },
+            Case {
+                label: "RESPONSE_RECEIVED with NULL lpv_info (verbose-only) -> no signal",
+                status: WINHTTP_CALLBACK_STATUS_RESPONSE_RECEIVED,
                 info_len: 0,
                 lpv_info: LpvInfo::Null,
                 expected: DispatchOutcome::Pending,
@@ -2955,9 +3055,9 @@ mod tests {
             ));
             let ctx = CallbackContext::new(&state);
 
-            // `dwStatusInformationLength` is the BYTE length of the wide string.
+            // REDIRECT reports `dwStatusInformationLength` in UTF-16 characters.
             let wide: Vec<u16> = case.redirect_to.encode_utf16().collect();
-            let byte_len = u32::try_from(wide.len() * 2).expect("byte len fits in u32");
+            let char_count = u32::try_from(wide.len()).expect("character count fits in u32");
 
             // SAFETY: `ctx` keeps the Arc alive across the call.
             // STATUS_REDIRECT is not HANDLE_CLOSING so the callback uses
@@ -2968,7 +3068,7 @@ mod tests {
                     ctx.as_raw(),
                     WINHTTP_CALLBACK_STATUS_REDIRECT,
                     wide.as_ptr() as *mut std::ffi::c_void,
-                    byte_len,
+                    char_count,
                 );
             }
 
