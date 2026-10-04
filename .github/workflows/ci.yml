@@ -126,6 +126,11 @@ jobs:
       if: steps.resolve.outputs.should-run-full-checks == 'true'
       uses: ./.github/actions/start-httpbin
 
+    - name: Start mTLS test server
+      # tests/mtls.rs is behind cfg(native_winhttp), on for every Windows job.
+      if: steps.resolve.outputs.should-run-full-checks == 'true' && runner.os == 'Windows'
+      uses: ./.github/actions/start-mtls
+
     - name: Run clippy
       if: steps.resolve.outputs.should-run-full-checks == 'true'
       run: cargo clippy --all-targets ${{ steps.resolve.outputs.flags }} -- -D warnings
@@ -143,6 +148,9 @@ jobs:
         echo "::endgroup::"
         echo "::group::go-httpbin (https) log"
         cat httpbin-https.log || echo "(no httpbin-https.log found)"
+        echo "::endgroup::"
+        echo "::group::mtls-server log"
+        cat mtls-server.log || echo "(no mtls-server.log found)"
         echo "::endgroup::"
 
     - name: Check library (MSRV)

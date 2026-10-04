@@ -316,10 +316,14 @@ impl std::error::Error for Error {
 /// failures into [`ErrorKind`] variants.
 fn error_kind_from_win32(code: u32) -> ErrorKind {
     match code {
-        ERROR_WINHTTP_CANNOT_CONNECT => ErrorKind::Connect,
-        ERROR_WINHTTP_NAME_NOT_RESOLVED => ErrorKind::Connect,
-        ERROR_WINHTTP_CONNECTION_ERROR => ErrorKind::Connect,
-        ERROR_WINHTTP_SECURE_FAILURE => ErrorKind::Connect,
+        ERROR_WINHTTP_CANNOT_CONNECT
+        | ERROR_WINHTTP_NAME_NOT_RESOLVED
+        | ERROR_WINHTTP_CONNECTION_ERROR
+        | ERROR_WINHTTP_SECURE_FAILURE
+        | ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED
+        | ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED_PROXY
+        | ERROR_WINHTTP_CLIENT_CERT_NO_PRIVATE_KEY
+        | ERROR_WINHTTP_CLIENT_CERT_NO_ACCESS_PRIVATE_KEY => ErrorKind::Connect,
         ERROR_WINHTTP_TIMEOUT => ErrorKind::Timeout,
         ERROR_WINHTTP_REDIRECT_FAILED => ErrorKind::Redirect,
         _ => ErrorKind::Request,
@@ -741,6 +745,30 @@ mod tests {
                 "connect (conn)",
             ),
             (ERROR_WINHTTP_SECURE_FAILURE, Error::is_connect, None, "connect (tls)"),
+            (
+                ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED,
+                Error::is_connect,
+                None,
+                "connect (client cert needed)",
+            ),
+            (
+                ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED_PROXY,
+                Error::is_connect,
+                None,
+                "connect (client cert needed by proxy)",
+            ),
+            (
+                ERROR_WINHTTP_CLIENT_CERT_NO_PRIVATE_KEY,
+                Error::is_connect,
+                None,
+                "connect (client cert has no key)",
+            ),
+            (
+                ERROR_WINHTTP_CLIENT_CERT_NO_ACCESS_PRIVATE_KEY,
+                Error::is_connect,
+                None,
+                "connect (client cert key unreachable)",
+            ),
             (ERROR_WINHTTP_TIMEOUT, Error::is_timeout, Some(io::ErrorKind::TimedOut), "timeout"),
             (ERROR_WINHTTP_REDIRECT_FAILED, Error::is_redirect, None, "redirect"),
             // Unknown code falls through to Request.

@@ -105,6 +105,28 @@ pub(crate) fn winhttp_set_option_u32(
     }
 }
 
+/// `WINHTTP_NO_CLIENT_CERT_CONTEXT`, a null `LPVOID`.  `windows-sys` 0.61 does
+/// not generate it at all; the `windows` crate generates it as `i32 = 0`,
+/// since the metadata keeps the macro's value but not its cast.
+const WINHTTP_NO_CLIENT_CERT_CONTEXT: *const core::ffi::c_void = std::ptr::null();
+
+/// `WinHttpSetOption(WINHTTP_OPTION_CLIENT_CERT_CONTEXT)` with
+/// `WINHTTP_NO_CLIENT_CERT_CONTEXT` and a zero length.
+///
+/// Tells WinHTTP the application has no client certificate, so a server
+/// that asks for one is answered rather than surfacing
+/// `ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED`.
+pub(crate) fn winhttp_set_no_client_cert(handle: RawWinHttpHandle) -> Result<(), Error> {
+    unsafe {
+        check_win32_bool(WinHttpSetOption(
+            handle,
+            WINHTTP_OPTION_CLIENT_CERT_CONTEXT,
+            WINHTTP_NO_CLIENT_CERT_CONTEXT,
+            0,
+        ))
+    }
+}
+
 /// `WinHttpSetOption` with a `usize` value (used for `CONTEXT_VALUE`).
 pub(crate) fn winhttp_set_option_usize(
     handle: RawWinHttpHandle,
