@@ -135,11 +135,6 @@ Unicode domains are converted lazily with system ICU. If ICU is unavailable,
 Unicode domain parsing returns `ParseError::IdnaError`. ASCII registered names
 bypass ICU, including `xn--` spellings that WHATWG would validate as A-labels.
 
-Wrest sanitizes userinfo during parsing: accessors expose decoded credentials,
-and serialized URLs omit them. Request construction converts the credentials
-into `Authorization: Basic`. Reqwest reaches the same request behavior but
-retains encoded userinfo in `url::Url` until it builds the request.
-
 The native URL type accepts only `http` and `https` because WinHTTP is the
 transport.
 

@@ -19,11 +19,10 @@
 //! - **Unicode domains:** require ICU, shipped in Windows 10 version 1903+.
 //! - **Strict input:** malformed percent escapes and invalid RFC syntax are
 //!   rejected instead of repaired.
-//! - **Sanitized userinfo:** unlike `url::Url`, Wrest decodes userinfo and
-//!   omits it from serialization during parsing. Request construction converts
-//!   the stored credentials into `Authorization: Basic`, matching reqwest's
-//!   eventual request behavior; reqwest performs the decoding and removal
-//!   later, while building the request.
+//! - **Sanitized userinfo:** unlike `url::Url`, Wrest stores userinfo
+//!   percent-encoded and omits it from serialization during parsing. Request
+//!   construction converts the decoded octets into `Authorization: Basic`,
+//!   then removes the userinfo, matching reqwest's request behavior.
 
 use crate::{Error, abi};
 use fluent_uri::pct_enc::{Encoder, encoder::RegName};
@@ -172,10 +171,10 @@ pub struct Url {
     /// Combined path + query string for `WinHttpOpenRequest`.
     /// Fragment is intentionally excluded -- WinHTTP does not send it.
     pub(crate) path_and_query: String,
-    /// Username from the `user:password@host` portion, percent-decoded.
-    /// Empty string when not present (matching `url::Url::username()`).
+    /// Percent-encoded username from the `user:password@host` portion.
+    /// Empty string when not present.
     pub(crate) username: String,
-    /// Password from the `user:password@host` portion, percent-decoded.
+    /// Percent-encoded password from the `user:password@host` portion.
     /// `None` when not present.
     pub(crate) password: Option<crate::redact::Redacted<String>>,
 }
@@ -363,7 +362,7 @@ impl Url {
         Some(path.split('/'))
     }
 
-    /// Return the username component of the URL, if present.
+    /// Return the percent-encoded username component of the URL.
     ///
     /// Returns `""` when no userinfo is present in the URL.
     /// Equivalent to `url::Url::username()`.
@@ -371,7 +370,7 @@ impl Url {
         &self.username
     }
 
-    /// Return the password component of the URL, if present.
+    /// Return the percent-encoded password component of the URL, if present.
     ///
     /// Returns `None` when no password is present in the URL.
     /// Equivalent to `url::Url::password()`.
@@ -532,13 +531,11 @@ impl Url {
         let encoded = parsed.to_uri();
         let encoded_authority = encoded.authority().ok_or(ParseError::EmptyHost)?;
         let (username, password) = match encoded_authority.userinfo() {
-            Some(userinfo) => {
-                let (raw_user, raw_pass) = match userinfo.as_str().split_once(':') {
-                    Some((user, pass)) => (user, Some(pass)),
-                    None => (userinfo.as_str(), None),
-                };
-                decode_userinfo(raw_user, raw_pass)
-            }
+            Some(userinfo) => match userinfo.as_str().split_once(':') {
+                Some((user, "")) => (user.to_owned(), None),
+                Some((user, password)) => (user.to_owned(), Some(password.to_owned())),
+                None => (userinfo.as_str().to_owned(), None),
+            },
             None => Default::default(),
         };
         let password = password.map(crate::redact::Redacted::new);
@@ -593,6 +590,21 @@ impl Url {
         self.rebuild_serialized();
     }
 
+    pub(crate) fn take_decoded_userinfo(&mut self) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+        if self.username.is_empty() && self.password.is_none() {
+            return None;
+        }
+
+        let decode = |input: &str| percent_encoding::percent_decode_str(input).collect();
+        let username = decode(&self.username);
+        let password = self
+            .password
+            .as_ref()
+            .map(|password| decode(password.expose()));
+        self.username.clear();
+        self.password = None;
+        Some((username, password))
+    }
     fn rebuild_serialized(&mut self) {
         self.path_and_query = self
             .query
@@ -673,24 +685,12 @@ fn normalize_registered_name(host: &str) -> Result<String, ParseError> {
     Ok(ascii)
 }
 
-fn decode_userinfo(raw_user: &str, raw_pass: Option<&str>) -> (String, Option<String>) {
-    let username = percent_decode_userinfo(raw_user);
-    let password = raw_pass.map(percent_decode_userinfo);
-    (username, password)
-}
-
 /// Percent-decode a UTF-8 string (e.g. `%40` to `@`).
 fn percent_decode(input: &str) -> Result<String, ParseError> {
     percent_encoding::percent_decode_str(input)
         .decode_utf8()
         .map(std::borrow::Cow::into_owned)
         .map_err(|_| ParseError::InvalidUrl)
-}
-
-fn percent_decode_userinfo(input: &str) -> String {
-    percent_encoding::percent_decode_str(input)
-        .decode_utf8_lossy()
-        .into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -721,13 +721,11 @@ mod tests {
         assert_eq!(percent_decode("alice%40example.com").unwrap(), "alice@example.com");
         assert_eq!(percent_decode("literal%ZZpercent").unwrap(), "literal%ZZpercent");
         assert_eq!(percent_decode("%FF").unwrap_err(), ParseError::InvalidUrl);
-        assert_eq!(percent_decode_userinfo("%FF"), "\u{FFFD}");
-        assert_eq!(
-            Url::parse(concat!("https://", "%FF", "@example.com"))
-                .unwrap()
-                .username(),
-            "\u{FFFD}"
-        );
+        let mut url = Url::parse("https://%FF@example.com").unwrap();
+        assert_eq!(url.username(), "%FF");
+        assert_eq!(url.take_decoded_userinfo(), Some((vec![0xFF], None)));
+        assert_eq!(url.username(), "");
+        assert_eq!(url.password(), None);
     }
 
     #[test]
@@ -1275,13 +1273,18 @@ mod tests {
             // Username only
             ("http://bob@example.com", "bob", None),
             // Percent-encoded: %40 = @, %3A = :
-            ("https://user%40domain:p%3Ass@example.com/", "user@domain", Some("p:ss")),
+            ("https://user%40domain:p%3Ass@example.com/", "user%40domain", Some("p%3Ass")),
+            ("https://caf%C3%A9:p%40ss@example.com/", "caf%C3%A9", Some("p%40ss")),
             // Empty password (user:@)
-            ("https://user:@example.com/", "user", Some("")),
-            // Uppercase hex A-F: %41='A', %4F='O' -- covers hex_nibble A-F branch
-            ("https://user%41%62:p%4Fss@example.com/", "userAb", Some("pOss")),
-            // Lowercase hex a-f: %5A='Z', %6a='j' -- covers hex_nibble a-f branch
-            ("https://%5A%6a@example.com/", "Zj", None),
+            ("https://user:@example.com/", "user", None),
+            // Empty userinfo
+            ("https://@example.com/", "", None),
+            // Empty username with password
+            ("https://:secret@example.com/", "", Some("secret")),
+            // Percent-encoded unreserved characters remain encoded.
+            ("https://user%41%62:p%4Fss@example.com/", "user%41%62", Some("p%4Fss")),
+            // Percent-escape hex digit casing is preserved.
+            ("https://%5A%6a@example.com/", "%5A%6a", None),
         ];
 
         for &(input, username, password) in cases {
@@ -1394,7 +1397,7 @@ mod tests {
         ),
         ("not a url", ParseError::InvalidUrl, "invalid URL", "invalid url (catch-all)"),
         (
-            concat!("https://", "user%GG", ":", "pass", "@example.com/path"),
+            "https://user%GG:pass@example.com/path",
             ParseError::InvalidUrl,
             "invalid URL",
             "invalid percent encoding in userinfo",

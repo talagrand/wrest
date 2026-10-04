@@ -457,7 +457,7 @@ impl RequestBuilder {
     /// that can be inspected, modified, and later executed with
     /// [`Client::execute()`](crate::Client::execute).
     pub fn build(self) -> Result<Request, Error> {
-        let url = self.url?;
+        let mut url = self.url?;
 
         // Build HeaderMap from string pairs.
         //
@@ -495,20 +495,21 @@ impl RequestBuilder {
             header_map.append(header_name, header_value);
         }
 
-        // Inject `Accept: */*` if no Accept header was set (matching reqwest /
-        // hyper default behaviour).
+        // Inject `Accept: */*` if no Accept header was set (matching reqwest / hyper default behavior).
         if !header_map.contains_key(http::header::ACCEPT) {
             header_map.insert(http::header::ACCEPT, http::HeaderValue::from_static("*/*"));
         }
 
-        // If the URL contains userinfo (user:password@host), inject an
-        // Authorization: Basic header -- matching reqwest's behaviour.
-        // Only inject if no Authorization header was already set.
-        if !url.username.is_empty() && !header_map.contains_key(http::header::AUTHORIZATION) {
-            let credentials = match &url.password {
-                Some(pass) => format!("{}:{}", url.username, pass.expose()),
-                None => format!("{}:", url.username),
-            };
+        // Consume URL userinfo before storing the URL. If no Authorization
+        // header was already set, inject it as Basic auth.
+        if let Some((username, password)) = url.take_decoded_userinfo()
+            && !header_map.contains_key(http::header::AUTHORIZATION)
+        {
+            let mut credentials = username;
+            credentials.push(b':');
+            if let Some(password) = password {
+                credentials.extend(password);
+            }
             use base64::Engine;
             let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
             if let Ok(val) = http::HeaderValue::from_str(&format!("Basic {encoded}")) {
@@ -1377,12 +1378,30 @@ mod tests {
                 Some("Bearer tok123"),
             ),
             (
-                "username only → user: base64",
+                "username only produces user: base64",
                 "https://bob@example.com/",
                 None,
                 Some("Basic Ym9iOg=="),
             ),
-            ("no userinfo → no auth", "https://example.com/api", None, None),
+            (
+                "empty username with password injects Basic auth",
+                "https://:secret@example.com/",
+                None,
+                Some("Basic OnNlY3JldA=="),
+            ),
+            (
+                "percent-encoded userinfo is decoded for Basic auth",
+                "https://caf%C3%A9:p%40ss@example.com/",
+                None,
+                Some("Basic Y2Fmw6k6cEBzcw=="),
+            ),
+            (
+                "non-UTF-8 userinfo preserves decoded bytes",
+                "https://%FF@example.com/",
+                None,
+                Some("Basic /zo="),
+            ),
+            ("no userinfo produces no auth", "https://example.com/api", None, None),
         ];
 
         let client = bare_client();
@@ -1397,6 +1416,11 @@ mod tests {
                 .get(http::header::AUTHORIZATION)
                 .map(|v| v.to_str().unwrap());
             assert_eq!(auth, expected, "{label}");
+            if let (None, Some(_)) = (explicit, expected) {
+                assert!(!req.headers()[http::header::AUTHORIZATION].is_sensitive(), "{label}");
+            }
+            assert_eq!(req.url().username(), "", "{label}: username");
+            assert_eq!(req.url().password(), None, "{label}: password");
         }
     }
 
