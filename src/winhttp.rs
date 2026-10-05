@@ -938,6 +938,7 @@ pub(crate) async fn execute_request(
 
     // Decompose the body into its inner representation so we can
     // distinguish in-memory bytes from streaming bodies.
+    let mut certless_redirect_retry = CertlessRedirectRetry::new(url, method, &body);
     let body_inner = body.map(|b| b.into_inner());
 
     // For in-memory bodies, store them in the Arc<RequestState> so the
@@ -1165,7 +1166,7 @@ pub(crate) async fn execute_request(
         // which outlives HANDLE_CLOSING).
         let body_ptr_usize = body_ptr;
 
-        await_win32(&state.signal, move || {
+        let sent = await_win32(&state.signal, move || {
             let optional = if inline_len > 0 {
                 body_ptr_usize as *const std::ffi::c_void
             } else {
@@ -1174,8 +1175,13 @@ pub(crate) async fn execute_request(
             abi::winhttp_send_request(h_send.as_mut_ptr(), optional, inline_len, inline_len)
                 .url_context(url)
         })
-        .await?
-        .into_result(&state, url)?;
+        .await
+        .and_then(|event| event.into_result(&state, url));
+        if let Err(err) = sent {
+            certless_redirect_retry
+                .on_error(err, &state, &request_handle, url)
+                .await?;
+        }
     } else {
         // Large-body path: send headers first, then stream the body in
         // chunks of up to DWORD::MAX bytes via WinHttpWriteData.
@@ -1242,13 +1248,23 @@ pub(crate) async fn execute_request(
         }
     }
 
-    // Receive response headers
-    let h_recv = request_handle.as_send();
-    await_win32(&state.signal, move || {
-        abi::winhttp_receive_response(h_recv.as_mut_ptr()).url_context(url)
-    })
-    .await?
-    .into_result(&state, url)?;
+    // Client-certificate challenges can surface during either send or receive.
+    loop {
+        let h_recv = request_handle.as_send();
+        let received = await_win32(&state.signal, move || {
+            abi::winhttp_receive_response(h_recv.as_mut_ptr()).url_context(url)
+        })
+        .await
+        .and_then(|event| event.into_result(&state, url));
+        match received {
+            Ok(()) => break,
+            Err(err) => {
+                certless_redirect_retry
+                    .on_error(err, &state, &request_handle, url)
+                    .await?
+            }
+        }
+    }
 
     // WinHttpReceiveResponse has completed -- the send body is no longer
     // referenced by WinHTTP.  Drop it eagerly to free memory before the
@@ -1292,6 +1308,72 @@ pub(crate) async fn execute_request(
         url: final_url,
         headers,
     })
+}
+
+struct CertlessRedirectRetry {
+    replay_safe: bool,
+    attempted: bool,
+}
+
+impl CertlessRedirectRetry {
+    fn new(initial_url: &Url, method: &str, body: &Option<Body>) -> Self {
+        // Direct HTTPS sets no-client-cert before sending. An HTTP-to-HTTPS
+        // redirect may instead need it after a client-cert challenge.
+        // By then a streamed body may already have been consumed. For simplicity,
+        // retry only an original GET without a body.
+        Self {
+            replay_safe: !initial_url.is_https && method == "GET" && body.is_none(),
+            attempted: false,
+        }
+    }
+
+    fn is_client_cert_needed(err: &Error) -> bool {
+        err.is_connect()
+            && err
+                .inner
+                .source
+                .as_deref()
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .is_some_and(|source| {
+                    source.raw_os_error()
+                        == Some(ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED.cast_signed())
+                })
+    }
+
+    /// Resend the existing HTTPS-redirected handle once, never the original HTTP URL.
+    async fn on_error(
+        &mut self,
+        err: Error,
+        state: &RequestState,
+        handle: &WinHttpRequestHandle,
+        initial_url: &Url,
+    ) -> Result<(), Error> {
+        if !self.replay_safe || self.attempted || !Self::is_client_cert_needed(&err) {
+            return Err(err);
+        }
+
+        // A redirect callback can close this handle to prevent a header leak.
+        // On ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED, WinHTTP prepares the request
+        // for another send; its *current* URL must be HTTPS before the
+        // no-client-cert option can be set.
+        if lock_or_clear(&state.callback_abort).is_aborted()
+            || !abi::winhttp_query_option_url(handle.raw(), WINHTTP_OPTION_URL)
+                .and_then(|current| Url::parse(&current).ok())
+                .is_some_and(|current| current.is_https)
+        {
+            return Err(err);
+        }
+
+        self.attempted = true;
+        abi::winhttp_set_no_client_cert(handle.raw()).url_context(initial_url)?;
+        let h_send = handle.as_send();
+        await_win32(&state.signal, move || {
+            abi::winhttp_send_request(h_send.as_mut_ptr(), std::ptr::null(), 0, 0)
+                .url_context(initial_url)
+        })
+        .await?
+        .into_result(state, initial_url)
+    }
 }
 
 /// Write the complete data buffer, honoring short `WRITE_COMPLETE` callbacks.
@@ -1636,6 +1718,70 @@ mod tests {
     use super::*;
     use std::task::Poll;
     use std::time::Duration;
+
+    #[test]
+    fn certless_redirect_retry_eligibility_cases() {
+        let http: Url = "http://127.0.0.1/".parse().unwrap();
+        let https: Url = "https://127.0.0.1/".parse().unwrap();
+        let stream = Body::wrap_stream(futures_util::stream::iter(vec![Ok::<_, std::io::Error>(
+            bytes::Bytes::from_static(b"data"),
+        )]));
+        let cases = [
+            ("HTTP GET without body", &http, "GET", None, true),
+            ("HTTPS GET without body", &https, "GET", None, false),
+            ("HTTP HEAD without body", &http, "HEAD", None, false),
+            ("HTTP POST without body", &http, "POST", None, false),
+            ("HTTP GET with empty body", &http, "GET", Some(Body::default()), false),
+            ("HTTP GET with bytes", &http, "GET", Some(Body::from("data")), false),
+            ("HTTP POST with bytes", &http, "POST", Some(Body::from("data")), false),
+            ("HTTP GET with stream", &http, "GET", Some(stream), false),
+        ];
+
+        for (label, url, method, body, expected) in cases {
+            assert_eq!(
+                CertlessRedirectRetry::new(url, method, &body).replay_safe,
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn certless_redirect_retry_error_cases() {
+        let http: Url = "http://127.0.0.1/".parse().unwrap();
+        let https: Url = "https://127.0.0.1/".parse().unwrap();
+        let state = RequestState::new(false, Origin::from_url(&https));
+        let cases = [
+            ("client cert needed", Error::from_win32(ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED), true),
+            (
+                "client cert needed with URL",
+                Error::from_win32(ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED).with_url(http),
+                true,
+            ),
+            (
+                "client cert needed from callback",
+                callback_error_to_error(ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED, &state, &https),
+                true,
+            ),
+            (
+                "nested client cert error",
+                Error::request(Error::from_win32(ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED)),
+                false,
+            ),
+            (
+                "request error with client cert code",
+                Error::request(std::io::Error::from_raw_os_error(
+                    ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED.cast_signed(),
+                )),
+                false,
+            ),
+            ("TLS failure", Error::from_win32(ERROR_WINHTTP_SECURE_FAILURE), false),
+        ];
+
+        for (label, err, expected) in cases {
+            assert_eq!(CertlessRedirectRetry::is_client_cert_needed(&err), expected, "{label}");
+        }
+    }
 
     // -- Large-body multi-write path --
     //
