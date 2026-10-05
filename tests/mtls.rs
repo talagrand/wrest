@@ -23,6 +23,10 @@ use tokio_rustls::{
         RootCertStore, ServerConfig, pki_types::PrivatePkcs8KeyDer, server::WebPkiClientVerifier,
     },
 };
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, path},
+};
 use wrest::{Client, StatusCode};
 
 struct TestServer {
@@ -35,14 +39,31 @@ enum ClientCert {
     Required,
 }
 
+enum Handshakes {
+    Direct,
+    RedirectRetry,
+}
+
 impl TestServer {
     fn run(client_cert: ClientCert, test: impl AsyncFnOnce(&TestServer)) {
+        Self::run_with_handshakes(client_cert, Handshakes::Direct, test);
+    }
+
+    fn run_with_retry(client_cert: ClientCert, test: impl AsyncFnOnce(&TestServer)) {
+        Self::run_with_handshakes(client_cert, Handshakes::RedirectRetry, test);
+    }
+
+    fn run_with_handshakes(
+        client_cert: ClientCert,
+        handshakes: Handshakes,
+        test: impl AsyncFnOnce(&TestServer),
+    ) {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("build mTLS test runtime")
             .block_on(async {
-                let mut server = Self::start(client_cert).await;
+                let mut server = Self::start(client_cert, handshakes).await;
                 test(&server).await;
                 tokio::time::timeout(Duration::from_secs(10), &mut server.task)
                     .await
@@ -51,7 +72,7 @@ impl TestServer {
             });
     }
 
-    async fn start(client_cert: ClientCert) -> Self {
+    async fn start(client_cert: ClientCert, handshakes: Handshakes) -> Self {
         let mut params =
             CertificateParams::new(vec!["127.0.0.1".to_owned()]).expect("test server SAN");
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -88,6 +109,16 @@ impl TestServer {
             let acceptor = TlsAcceptor::from(Arc::new(config));
             let (socket, _) = listener.accept().await.expect("accept mTLS connection");
             let handshake = acceptor.accept(socket).await;
+            let handshake = if matches!(handshakes, Handshakes::RedirectRetry) {
+                handshake.expect_err("first handshake must need client cert context");
+                let (socket, _) = listener
+                    .accept()
+                    .await
+                    .expect("accept retried HTTPS connection");
+                acceptor.accept(socket).await
+            } else {
+                handshake
+            };
             if matches!(client_cert, ClientCert::Required) {
                 let err = handshake.expect_err("server must reject a missing client certificate");
                 assert!(
@@ -143,12 +174,40 @@ impl Drop for TestServer {
     }
 }
 
+async fn redirect_server(destination: &str) -> MockServer {
+    let redirect = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/redirect"))
+        .respond_with(ResponseTemplate::new(302).insert_header("Location", destination))
+        .mount(&redirect)
+        .await;
+    redirect
+}
+
+async fn assert_one_redirect(redirect: &MockServer) {
+    let requests = redirect
+        .received_requests()
+        .await
+        .expect("recorded HTTP redirect requests");
+    assert_eq!(requests.len(), 1, "the original HTTP request must not be replayed");
+}
+
 /// A client with no cert identity
 fn certless_client() -> Client {
     Client::builder()
         .timeout(Duration::from_secs(10))
         // The server certificate is self-signed and generated per run.
         .tls_danger_accept_invalid_certs(true)
+        .build()
+        .expect("client should build")
+}
+
+fn certless_client_no_retry() -> Client {
+    Client::builder()
+        .timeout(Duration::from_secs(10))
+        .tls_danger_accept_invalid_certs(true)
+        // Isolate the WinHTTP handle retry from the client's outer retry.
+        .retry(wrest::retry::never())
         .build()
         .expect("client should build")
 }
@@ -181,5 +240,39 @@ fn a_required_client_certificate_still_fails() {
             .expect_err("a server requiring a certificate must reject us");
 
         assert!(err.is_connect(), "expected a connect failure, got: {err:?}");
+    });
+}
+
+#[test]
+fn an_http_redirect_to_optional_client_certificate_is_answered() {
+    TestServer::run_with_retry(ClientCert::Optional, async |server| {
+        let redirect = redirect_server(&server.url).await;
+
+        let response = certless_client()
+            .get(format!("{}/redirect", redirect.uri()))
+            .send()
+            .await
+            .expect("the redirect should reach the HTTPS server");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.url().as_str(), server.url);
+        assert_eq!(response.text().await.expect("body should read"), "none");
+        assert_one_redirect(&redirect).await;
+    });
+}
+
+#[test]
+fn an_http_redirect_to_required_client_certificate_still_fails() {
+    TestServer::run_with_retry(ClientCert::Required, async |server| {
+        let redirect = redirect_server(&server.url).await;
+
+        let err = certless_client_no_retry()
+            .get(format!("{}/redirect", redirect.uri()))
+            .send()
+            .await
+            .expect_err("the HTTPS server must reject a missing client certificate");
+
+        assert!(err.is_connect(), "expected a connect failure, got: {err:?}");
+        assert_one_redirect(&redirect).await;
     });
 }
