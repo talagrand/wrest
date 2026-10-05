@@ -217,13 +217,17 @@ mime = "0.3.16"
 scopeguard = { version = "1", default-features = false }
 percent-encoding = "2.3"
 
+[target.'cfg(windows)'.dev-dependencies]
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs"] }
+tokio-rustls = "0.26.5"
+
 # On non-Windows platforms, reqwest is used as the HTTP passthrough.
 [target.'cfg(not(windows))'.dependencies]
 reqwest = { version = "0.13", default-features = false }
 tokio = { version = "1.44.2", default-features = false, features = ["rt"] }
 
 [dev-dependencies]
-tokio = { version = "1.44.2", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.44.2", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 wiremock = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
