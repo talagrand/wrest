@@ -273,15 +273,32 @@ pub(crate) struct TlsConfig {
 #[cfg(all(test, feature = "client-cert"))]
 mod identity_tests {
     use super::*;
+    use std::sync::OnceLock;
 
     /// A self-signed certificate, used only to obtain a real
     /// `CERT_CONTEXT`.  Its private key is absent; nothing here
     /// completes a handshake.
-    const TEST_DER: &[u8] = include_bytes!("../tests/fixtures/test-client-cert.der");
+    fn fixture_der() -> &'static [u8] {
+        static DER: OnceLock<Vec<u8>> = OnceLock::new();
+        DER.get_or_init(|| {
+            let mut params = rcgen::CertificateParams::new(Vec::<String>::new())
+                .expect("fixture certificate parameters");
+            params
+                .distinguished_name
+                .push(rcgen::DnType::CommonName, "wrest-test-client");
+            let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+                .expect("generate fixture key");
+            params
+                .self_signed(&key)
+                .expect("sign fixture certificate")
+                .der()
+                .to_vec()
+        })
+    }
 
     /// Build an `Identity` from the fixture without touching any store.
     fn fixture_identity() -> Identity {
-        let ctx = crate::abi::create_cert_context(TEST_DER).expect("fixture DER should parse");
+        let ctx = crate::abi::create_cert_context(fixture_der()).expect("fixture DER should parse");
         // `from_cert_context` takes its own reference, so release ours.
         let identity = unsafe { Identity::from_cert_context(ctx.cast()) };
         unsafe { crate::abi::free_cert_context(ctx) };
@@ -290,7 +307,7 @@ mod identity_tests {
 
     #[test]
     fn fixture_parses_as_a_certificate() {
-        let ctx = crate::abi::create_cert_context(TEST_DER).expect("fixture DER should parse");
+        let ctx = crate::abi::create_cert_context(fixture_der()).expect("fixture DER should parse");
         assert!(!ctx.is_null());
         unsafe { crate::abi::free_cert_context(ctx) };
 
