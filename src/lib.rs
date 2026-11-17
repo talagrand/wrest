@@ -94,6 +94,16 @@ pub async fn get<U: IntoUrl>(url: U) -> crate::Result<Response> {
 // type is a simple pass-through to `reqwest`.
 // ============================================================
 
+// These crates may not be used under always-reqwest on Windows
+// (some are transitive dependencies of other dependencies)
+// but expressing a native condition is not possible in Cargo
+// and disabling the warning itself throws a warning on older Rust.
+#[cfg(all(windows, feature = "always-reqwest"))]
+use {
+    base64 as _, fluent_uri as _, futures_channel as _, futures_executor as _, futures_util as _,
+    libc as _, mime as _, percent_encoding as _, scopeguard as _, windows_sys as _,
+};
+
 #[cfg(not(native_winhttp))]
 pub use reqwest::{
     Body, Client, ClientBuilder, Error, IntoUrl, NoProxy, Proxy, Request, RequestBuilder, Response,
