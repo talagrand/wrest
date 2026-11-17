@@ -372,9 +372,9 @@ impl Drop for RequestCallbackGuard<'_> {
 ///    final callback for this request); and
 /// 2. no other WinHTTP callback is currently active for this request.
 ///
-/// After `Drop` returns, no WinHTTP callback can re-enter this DLL for
-/// this request -- the DLL-unload invariant the native backend depends
-/// on.
+/// This drains request-state access, not callback return instructions.
+/// [`WinHttpSession`] separately makes a best-effort wait for WinHTTP's unload
+/// notification before its own drop returns.
 pub(crate) struct WinHttpRequestHandle {
     handle: *mut core::ffi::c_void,
     state: Arc<RequestState>,
@@ -774,9 +774,28 @@ pub(crate) struct SessionConfig {
 }
 
 /// An open WinHTTP session with the callback installed.
+///
+/// Drop waits at most five seconds for the unload notification. On timeout,
+/// callbacks may still be active, so the unload event is intentionally retained.
 pub(crate) struct WinHttpSession {
     pub handle: WinHttpHandle,
     pub verbose: bool,
+    unload_event: Option<abi::WinHttpUnloadEvent>,
+}
+
+impl Drop for WinHttpSession {
+    fn drop(&mut self) {
+        let handle = std::mem::replace(&mut self.handle.0, std::ptr::null_mut());
+        if !abi::close_winhttp_handle(handle) {
+            warn!("Failed to close WinHTTP session; skipping unload notification wait");
+            return;
+        }
+        if let Some(event) = &mut self.unload_event
+            && let Err(_error) = event.wait(5_000)
+        {
+            warn!(error = %_error, "Failed to wait for WinHTTP session callbacks");
+        }
+    }
 }
 
 impl WinHttpSession {
@@ -799,19 +818,27 @@ impl WinHttpSession {
             WINHTTP_FLAG_ASYNC,
         )?;
 
-        let session = WinHttpHandle(h_session);
+        let handle = WinHttpHandle(h_session);
+        let unload_event = abi::WinHttpUnloadEvent::new(handle.0).ok();
+        // Attempt to install the unload fence before registering any callback,
+        // including null-context session/connection callbacks and error paths.
+        let session = Self {
+            handle,
+            verbose: config.verbose,
+            unload_event,
+        };
 
         // Install the status callback on the session (inherited by all children).
         // If this fails, every async operation would hang -- must propagate.
         abi::winhttp_set_status_callback(
-            session.0,
+            session.handle.0,
             Some(winhttp_callback),
             WINHTTP_CALLBACK_FLAG_ALL_NOTIFICATIONS,
         )?;
 
         // Set timeouts. nResolveTimeout = 0 means OS default.
         abi::winhttp_set_timeouts(
-            session.0,
+            session.handle.0,
             0, // resolve: OS default
             config.connect_timeout_ms,
             config.send_timeout_ms,
@@ -832,7 +859,7 @@ impl WinHttpSession {
         // WinHTTP negotiates the highest mutually supported version with the server.
         if !config.http1_only {
             let _ = abi::winhttp_set_option_u32(
-                session.0,
+                session.handle.0,
                 WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL,
                 WINHTTP_PROTOCOL_FLAG_HTTP2,
             );
@@ -842,7 +869,7 @@ impl WinHttpSession {
         // Fallback: responses arrive uncompressed, which is functional
         // but slower.
         let _ = abi::winhttp_set_option_u32(
-            session.0,
+            session.handle.0,
             WINHTTP_OPTION_DECOMPRESSION,
             WINHTTP_DECOMPRESSION_FLAG_GZIP | WINHTTP_DECOMPRESSION_FLAG_DEFLATE,
         );
@@ -850,12 +877,20 @@ impl WinHttpSession {
         // Enable assured non-blocking callbacks.  Without this, WinHTTP may
         // block inside a callback waiting for another callback to complete,
         // deadlocking the async model.  Must propagate.
-        abi::winhttp_set_option_u32(session.0, WINHTTP_OPTION_ASSURED_NON_BLOCKING_CALLBACKS, 1)?;
+        abi::winhttp_set_option_u32(
+            session.handle.0,
+            WINHTTP_OPTION_ASSURED_NON_BLOCKING_CALLBACKS,
+            1,
+        )?;
 
         // Set max connections per host (only if explicitly configured).
         // The caller asked for this -- silent failure would be misleading.
         if let Some(max_conns) = config.max_connections_per_host {
-            abi::winhttp_set_option_u32(session.0, WINHTTP_OPTION_MAX_CONNS_PER_SERVER, max_conns)?;
+            abi::winhttp_set_option_u32(
+                session.handle.0,
+                WINHTTP_OPTION_MAX_CONNS_PER_SERVER,
+                max_conns,
+            )?;
         }
 
         // Apply redirect policy
@@ -863,14 +898,14 @@ impl WinHttpSession {
             Some(policy) => match &policy.inner {
                 redirect::PolicyInner::None => {
                     abi::winhttp_set_option_u32(
-                        session.0,
+                        session.handle.0,
                         WINHTTP_OPTION_REDIRECT_POLICY,
                         WINHTTP_OPTION_REDIRECT_POLICY_NEVER,
                     )?;
                 }
                 redirect::PolicyInner::Limited(max) => {
                     abi::winhttp_set_option_u32(
-                        session.0,
+                        session.handle.0,
                         WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS,
                         *max,
                     )?;
@@ -879,17 +914,14 @@ impl WinHttpSession {
             None => {
                 // Default: follow up to 10 redirects
                 abi::winhttp_set_option_u32(
-                    session.0,
+                    session.handle.0,
                     WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS,
                     10,
                 )?;
             }
         }
 
-        Ok(Self {
-            handle: session,
-            verbose: config.verbose,
-        })
+        Ok(session)
     }
 }
 
@@ -979,7 +1011,8 @@ pub(crate) async fn execute_request(
 
     // Park a context strong ref for the WinHTTP callback. On `SetOption`
     // failure the plain `WinHttpHandle::drop` closes without draining --
-    // safe, since the null-`dw_context` guard short-circuits HANDLE_CLOSING.
+    // safe for request state, since the null-`dw_context` guard short-circuits
+    // HANDLE_CLOSING. The session unload event still fences callback return.
     let ctx = CallbackContext::<RequestState>::new(&state);
     abi::winhttp_set_option_usize(request_handle.0, WINHTTP_OPTION_CONTEXT_VALUE, ctx.as_raw())
         .map_err(|e| e.with_url(url.clone()))?;
@@ -2814,6 +2847,139 @@ mod tests {
         let close = state.lock_close_state();
         assert!(close.closed, "HANDLE_CLOSING must set closed=true");
         assert_eq!(close.active_callbacks, 0, "active_callbacks must balance to 0");
+    }
+
+    #[test]
+    fn session_drop_without_unload_notification_still_closes_handle() {
+        let mut session = WinHttpSession::open(&SessionConfig {
+            user_agent: String::new(),
+            connect_timeout_ms: 10_000,
+            send_timeout_ms: 0,
+            read_timeout_ms: 0,
+            verbose: false,
+            max_connections_per_host: None,
+            proxy: ProxyAction::Direct,
+            redirect_policy: None,
+            http1_only: false,
+        })
+        .expect("session should open");
+        let mut event = session
+            .unload_event
+            .take()
+            .expect("notification should be available");
+        drop(session);
+        event
+            .wait(5_000)
+            .expect("session should close even without its notification waiter");
+    }
+
+    #[test]
+    fn session_drop_waits_for_handle_closing_callback_to_return() {
+        use std::sync::mpsc;
+
+        struct HeldCallback {
+            request_context: usize,
+            entered: mpsc::Sender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+        }
+
+        unsafe extern "system" fn held_callback(
+            handle: *mut core::ffi::c_void,
+            context: usize,
+            status: u32,
+            info: *mut core::ffi::c_void,
+            info_len: u32,
+        ) {
+            if context == 0 {
+                return;
+            }
+            // SAFETY: the installed context is retained until HANDLE_CLOSING.
+            let held = unsafe { CallbackContext::<HeldCallback>::clone_arc_from_raw(context) };
+            if status == WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING {
+                unsafe { CallbackContext::<HeldCallback>::drop_raw(context) };
+            }
+            unsafe {
+                winhttp_callback(handle, held.request_context, status, info, info_len);
+            }
+            if status == WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING {
+                let _ = held.entered.send(());
+                // Keep executing callback code after request-level bookkeeping
+                // has completed. Dropping the sender also releases us on failure.
+                let _ = lock_or_clear(&held.release).recv_timeout(Duration::from_secs(10));
+            }
+        }
+
+        let session = WinHttpSession::open(&SessionConfig {
+            user_agent: String::new(),
+            connect_timeout_ms: 10_000,
+            send_timeout_ms: 0,
+            read_timeout_ms: 0,
+            verbose: false,
+            max_connections_per_host: None,
+            proxy: ProxyAction::Direct,
+            redirect_policy: None,
+            http1_only: false,
+        })
+        .expect("session should open");
+        let connection = WinHttpHandle(
+            abi::winhttp_connect(session.handle.0, "localhost", 80)
+                .expect("connection should open"),
+        );
+        let request = WinHttpHandle(
+            abi::winhttp_open_request(connection.0, "GET", "/", false)
+                .expect("request should open"),
+        );
+        let state = Arc::new(RequestState::new_test());
+        let request_context = CallbackContext::new(&state);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let held = Arc::new(HeldCallback {
+            request_context: request_context.as_raw(),
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        });
+        let context = CallbackContext::new(&held);
+        abi::winhttp_set_status_callback(
+            request.0,
+            Some(held_callback),
+            WINHTTP_CALLBACK_FLAG_ALL_NOTIFICATIONS,
+        )
+        .expect("callback should install");
+        abi::winhttp_set_option_usize(request.0, WINHTTP_OPTION_CONTEXT_VALUE, context.as_raw())
+            .expect("context should install");
+        let _ = context.into_raw();
+        let _ = request_context.into_raw();
+        let close_worker = std::thread::spawn(move || {
+            drop(request);
+            drop(connection);
+        });
+        let (done_tx, done_rx) = mpsc::channel();
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("final callback should run");
+        assert!(state.lock_close_state().closed, "request bookkeeping should already be complete");
+        assert_eq!(state.lock_close_state().active_callbacks, 0);
+        let worker = std::thread::spawn(move || {
+            drop(session);
+            done_tx.send(()).expect("session drop receiver should live");
+        });
+
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout),
+            "session drop must not finish while the final callback is executing"
+        );
+        release_tx
+            .send(())
+            .expect("callback should still be waiting");
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("session drain should finish");
+        worker.join().expect("session drop worker should succeed");
+        close_worker
+            .join()
+            .expect("request close worker should succeed");
     }
 
     // ---------------------------------------------------------------------

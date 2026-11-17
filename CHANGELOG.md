@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ## Unreleased
 
 ### Fixed
+- DLL-host safety: make a best-effort wait, capped at five seconds, for WinHTTP's session unload notification during teardown, covering callback return and null-context callbacks.
 - DLL load: load system icu.dll from system32 to prevent dll planting.
 - HTTP Timeouts: keep explicit zero and positive sub-millisecond phase timeouts finite by clamping/rounding to 1ms.
 - Parsing - URL: replace the hybrid WinHttpCrackUrl/bespoke URL parser with RFC 3986/3987-conformant parsing via `fluent-uri` and ICU UTS #46 handling.

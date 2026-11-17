@@ -2,7 +2,11 @@
 
 use super::{check_win32_bool, last_win32_error, to_wide};
 use crate::Error;
-use windows_sys::Win32::{Foundation::GetLastError, Networking::WinHttp::*};
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, GetLastError, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    Networking::WinHttp::*,
+    System::Threading::{CreateEventW, WaitForSingleObject},
+};
 
 /// Raw handle type used by WinHTTP (`*mut c_void`).
 pub(crate) type RawWinHttpHandle = *mut core::ffi::c_void;
@@ -44,6 +48,68 @@ pub(crate) fn close_winhttp_handle(handle: RawWinHttpHandle) -> bool {
     }
 
     unsafe { WinHttpCloseHandle(handle) != 0 }
+}
+
+/// Session-wide notification that WinHTTP has returned from its last callback.
+///
+/// If teardown fails, retains the event so WinHTTP cannot signal a closed handle.
+pub(crate) struct WinHttpUnloadEvent {
+    handle: HANDLE,
+    safe_to_release: bool,
+}
+
+impl WinHttpUnloadEvent {
+    pub(crate) fn new(session: RawWinHttpHandle) -> Result<Self, Error> {
+        let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+        if handle.is_null() {
+            return Err(last_win32_error());
+        }
+        let mut event = Self {
+            handle,
+            safe_to_release: true,
+        };
+        winhttp_set_option_usize(session, WINHTTP_OPTION_UNLOAD_NOTIFY_EVENT, handle as usize)?;
+        event.safe_to_release = false;
+        Ok(event)
+    }
+
+    pub(crate) fn wait(&mut self, timeout_ms: u32) -> Result<(), Error> {
+        // WinHTTP, not callback code in this module, signals the event.
+        let result = unsafe { WaitForSingleObject(self.handle, timeout_ms) };
+        self.complete_wait(result)
+    }
+
+    fn complete_wait(&mut self, result: u32) -> Result<(), Error> {
+        match result {
+            WAIT_OBJECT_0 => {
+                self.safe_to_release = true;
+                Ok(())
+            }
+            WAIT_TIMEOUT => {
+                Err(Error::timeout("timed out waiting for WinHTTP unload notification"))
+            }
+            WAIT_FAILED => Err(last_win32_error()),
+            other => Err(Error::request(format!(
+                "unexpected WinHTTP unload notification wait result: {other}"
+            ))),
+        }
+    }
+}
+
+// SAFETY: the event is owned, and Windows permits its use on any thread.
+unsafe impl Send for WinHttpUnloadEvent {}
+unsafe impl Sync for WinHttpUnloadEvent {}
+
+impl Drop for WinHttpUnloadEvent {
+    fn drop(&mut self) {
+        if !self.safe_to_release {
+            warn!("WinHTTP callbacks may still be active; retaining the unload event");
+            return;
+        }
+        if unsafe { CloseHandle(self.handle) } == 0 {
+            warn!("Failed to close WinHTTP unload notification event");
+        }
+    }
 }
 
 /// `WinHttpSetStatusCallback` -- install a status callback on a handle.
@@ -508,4 +574,65 @@ pub(crate) fn winhttp_write_data(
     len: u32,
 ) -> Result<(), Error> {
     unsafe { check_win32_bool(WinHttpWriteData(handle, buf, len, std::ptr::null_mut())) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unload_event_releases_resources_after_successful_wait() {
+        let session =
+            winhttp_open_session("", WINHTTP_ACCESS_TYPE_NO_PROXY, None, WINHTTP_FLAG_ASYNC)
+                .unwrap();
+        let mut event = WinHttpUnloadEvent::new(session).unwrap();
+        assert!(!event.safe_to_release);
+        assert!(close_winhttp_handle(session));
+        event
+            .wait(5_000)
+            .expect("unload notification should arrive");
+        assert!(event.safe_to_release);
+    }
+
+    #[test]
+    fn unload_event_wait_times_out_and_can_complete_later() {
+        let session =
+            winhttp_open_session("", WINHTTP_ACCESS_TYPE_NO_PROXY, None, WINHTTP_FLAG_ASYNC)
+                .unwrap();
+        let mut event = WinHttpUnloadEvent::new(session).unwrap();
+
+        let error = event
+            .wait(10)
+            .expect_err("an open session should not signal unload");
+        assert!(error.is_timeout());
+        assert!(!event.safe_to_release);
+
+        assert!(close_winhttp_handle(session));
+        event
+            .wait(5_000)
+            .expect("unload notification should arrive after close");
+        assert!(event.safe_to_release);
+    }
+
+    #[test]
+    fn unload_event_retains_resources_when_teardown_is_incomplete() {
+        for result in [None, Some(WAIT_FAILED), Some(WAIT_TIMEOUT)] {
+            let session =
+                winhttp_open_session("", WINHTTP_ACCESS_TYPE_NO_PROXY, None, WINHTTP_FLAG_ASYNC)
+                    .unwrap();
+            let mut event = WinHttpUnloadEvent::new(session).unwrap();
+            let handle = event.handle;
+            if let Some(result) = result {
+                assert!(event.complete_wait(result).is_err());
+            }
+            assert!(!event.safe_to_release);
+            drop(event);
+
+            // Even after failed teardown, WinHTTP must still be able to signal
+            // the retained event. Release the intentionally leaked handle here.
+            assert!(close_winhttp_handle(session));
+            assert_eq!(unsafe { WaitForSingleObject(handle, 5_000) }, WAIT_OBJECT_0);
+            assert_ne!(unsafe { CloseHandle(handle) }, 0);
+        }
+    }
 }
